@@ -1,0 +1,20 @@
+[package]
+name = "rust-vpn"
+version = "0.1.0"
+edition = "2021"
+authors = ["rust-vpn contributors"]
+description = "A point-to-point VPN solution written in Rust"
+license = "Apache-2.0"
+
+[dependencies]
+tokio = { version = "1.35", features = ["full"] }
+clap = { version = "4.4", features = ["derive"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tun = "0.6"
+log = "0.4"
+env_logger = "0.11"
+anyhow = "1.0"
+chacha20poly1305 = "0.10"
+rand = "0.8"
+base64 = "0.21"
