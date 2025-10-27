@@ -1,7 +1,9 @@
+#![allow(deprecated)]
+
 use anyhow::Result;
 use chacha20poly1305::{
-    aead::{Aead, KeyInit, OsRng},
-    ChaCha20Poly1305, Nonce,
+    aead::{Aead, KeyInit, OsRng, generic_array::GenericArray},
+    ChaCha20Poly1305,
 };
 use rand::RngCore;
 
@@ -24,7 +26,7 @@ impl Crypto {
         // Generate random nonce
         let mut nonce_bytes = [0u8; 12];
         OsRng.fill_bytes(&mut nonce_bytes);
-        let nonce = Nonce::from_slice(&nonce_bytes);
+        let nonce = GenericArray::from_slice(&nonce_bytes);
 
         // Encrypt the data
         let ciphertext = self
@@ -45,7 +47,7 @@ impl Crypto {
         }
 
         // Extract nonce (first 12 bytes)
-        let nonce = Nonce::from_slice(&data[..12]);
+        let nonce = GenericArray::from_slice(&data[..12]);
 
         // Extract ciphertext (remaining bytes)
         let ciphertext = &data[12..];

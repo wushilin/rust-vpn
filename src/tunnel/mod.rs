@@ -2,7 +2,7 @@ use anyhow::Result;
 use std::io::{Read, Write};
 use std::net::IpAddr;
 use tun::platform::Device as PlatformDevice;
-use tun::{Configuration, Device, Layer};
+use tun::{Configuration, Layer};
 
 pub struct TunDevice {
     device: PlatformDevice,
@@ -39,9 +39,5 @@ impl TunDevice {
 
     pub fn write(&mut self, buf: &[u8]) -> Result<usize> {
         self.device.write(buf).map_err(Into::into)
-    }
-
-    pub fn get_mtu(&self) -> Result<i32> {
-        self.device.mtu().map_err(Into::into)
     }
 }
