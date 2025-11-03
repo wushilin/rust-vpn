@@ -976,12 +976,12 @@ pub fn generate_token() -> String {
 }
 
 pub fn random_string_from_choices(choices: &str, length: usize) -> String {
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     let mut chars = vec!['0'; length];
     for i in 0..length {
         chars[i] = choices
             .chars()
-            .nth(rng.gen_range(0..choices.len()))
+            .nth(rng.random_range(0..choices.len()))
             .unwrap();
     }
     return chars.iter().collect();
