@@ -19,6 +19,14 @@ path = "src/client.rs"
 name="server"
 path = "src/server.rs"
 
+[[bin]]
+name="tcpserver"
+path = "src/tcpserver.rs"
+
+[[bin]]
+name="tcpclient"
+path = "src/tcpclient.rs"
+
 [build-dependencies]
 chrono = "0.4"
 hostname = "0.3"
@@ -42,10 +50,12 @@ uuid = { version = "1", features = ["v4", "serde"] }
 # Random number generation
 rand = "0.8"
 quinn = "0.11.9"
+bytes = "1"
 rcgen = "0.12"
 rustls = { version = "0.23", features = ["aws-lc-rs"] }
 rustls-pki-types = "1"
 rustls-pemfile = "2"
+tokio-rustls = "0.25"
 x509-parser = "0.18"
 
 tokio-tree-context = "0.1.5"

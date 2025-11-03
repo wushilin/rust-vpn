@@ -83,6 +83,54 @@ pub fn load_ca_bundle(pem_file: &str) -> Result<quinn::rustls::RootCertStore> {
     Ok(root_store)
 }
 
+pub fn load_ca_bundle_tcp(pem_file: &str) -> Result<rustls::RootCertStore> {
+    debug!("Loading CA bundle from: {}", pem_file);
+    let pem_bytes = fs::read(pem_file)
+        .with_context(|| format!("Failed to read CA bundle file: {}", pem_file))?;
+    let pem_str = String::from_utf8(pem_bytes)
+        .context("CA bundle file is not valid UTF-8")?;
+
+    let mut root_store = rustls::RootCertStore::empty();
+    let mut count = 0;
+    for pem in rustls_pemfile::certs(&mut pem_str.as_bytes()) {
+        let cert = pem.context("Failed to parse PEM certificate in CA bundle")?;
+        root_store.add(cert)?;
+        count += 1;
+    }
+
+    if root_store.is_empty() {
+        error!("No CA certificates found in {}", pem_file);
+        anyhow::bail!("No CA certificates found in {}", pem_file);
+    }
+
+    info!("Loaded {} CA certificate(s) from {}", count, pem_file);
+    Ok(root_store)
+}
+
+pub fn load_ca_bundle_tcp_tokio(pem_file: &str) -> Result<tokio_rustls::rustls::RootCertStore> {
+    debug!("Loading CA bundle from: {}", pem_file);
+    let pem_bytes = fs::read(pem_file)
+        .with_context(|| format!("Failed to read CA bundle file: {}", pem_file))?;
+    let pem_str = String::from_utf8(pem_bytes)
+        .context("CA bundle file is not valid UTF-8")?;
+
+    let mut root_store = tokio_rustls::rustls::RootCertStore::empty();
+    let mut count = 0;
+    for pem in rustls_pemfile::certs(&mut pem_str.as_bytes()) {
+        let cert = pem.context("Failed to parse PEM certificate in CA bundle")?;
+        root_store.add(cert)?;
+        count += 1;
+    }
+
+    if root_store.is_empty() {
+        error!("No CA certificates found in {}", pem_file);
+        anyhow::bail!("No CA certificates found in {}", pem_file);
+    }
+
+    info!("Loaded {} CA certificate(s) from {}", count, pem_file);
+    Ok(root_store)
+}
+
 pub fn extract_cn_from_cert(cert: &rustls_pki_types::CertificateDer) -> Result<String> {
     use x509_parser::prelude::*;
     let (_, cert) = X509Certificate::from_der(cert.as_ref())
@@ -205,12 +253,13 @@ pub fn build_client_config(
 pub fn get_client_transport_config() -> Result<quinn::TransportConfig> {
     let mut transport_config = quinn::TransportConfig::default();
     // Optional datagram buffers for flexibility
-    transport_config.datagram_receive_buffer_size(Some(10*1024*1024));
-    transport_config.datagram_send_buffer_size(10*1024*1024);
+    transport_config.datagram_receive_buffer_size(Some(32*1024*1024));
+    transport_config.datagram_send_buffer_size(3*1024*1024);
     // High BDP windows to sustain throughput on high-latency links
     transport_config.receive_window(quinn::VarInt::from_u64(128 * 1024 * 1024)?);
     transport_config.send_window(128 * 1024 * 1024);
-    transport_config.stream_receive_window(quinn::VarInt::from_u64(16 * 1024 * 1024)?);
+    transport_config.stream_receive_window(quinn::VarInt::from_u64(32 * 1024 * 1024)?);
+    transport_config.congestion_controller_factory(Arc::new(quinn::congestion::BbrConfig::default()));
     transport_config.max_concurrent_bidi_streams(200_u32.into());
     transport_config.max_concurrent_uni_streams(200_u32.into());
     transport_config.max_idle_timeout(Some(Duration::from_secs(5).try_into().map_err(|_| anyhow::anyhow!("invalid idle timeout"))?));
@@ -219,9 +268,13 @@ pub fn get_client_transport_config() -> Result<quinn::TransportConfig> {
 
 pub fn get_server_transport_config() -> Result<quinn::TransportConfig> {
     let mut transport_config = quinn::TransportConfig::default();
+    // Enable datagram buffers for datagram support
+    transport_config.datagram_receive_buffer_size(Some(32*1024*1024));
+    transport_config.datagram_send_buffer_size(32*1024*1024);
     transport_config.receive_window(quinn::VarInt::from_u64(128 * 1024 * 1024)?);
     transport_config.send_window(128 * 1024 * 1024);
-    transport_config.stream_receive_window(quinn::VarInt::from_u64(16 * 1024 * 1024)?);
+    transport_config.stream_receive_window(quinn::VarInt::from_u64(32 * 1024 * 1024)?);
+    transport_config.congestion_controller_factory(Arc::new(quinn::congestion::BbrConfig::default()));
     transport_config.max_concurrent_bidi_streams(200_u32.into());
     transport_config.max_concurrent_uni_streams(200_u32.into());
     transport_config.max_idle_timeout(Some(Duration::from_secs(5).try_into().map_err(|_| anyhow::anyhow!("invalid idle timeout"))?));

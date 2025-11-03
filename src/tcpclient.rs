@@ -1,0 +1,353 @@
+use anyhow::{Context, Result};
+use clap::Parser;
+use std::{cmp::{max}, sync::Arc, time::Duration};
+use tracing::{debug, error, info, warn};
+use tokio::net::TcpStream;
+use tokio_rustls::TlsConnector;
+use rustls_pki_types::ServerName;
+
+pub mod packetutil;
+pub mod utils;
+pub mod quicutil;
+pub mod stats;
+pub mod tunutil;
+use stats::Stats;
+
+const BUILD_BRANCH: &str = env!("BUILD_BRANCH");
+const BUILD_TIME: &str = env!("BUILD_TIME");
+const BUILD_HOST: &str = env!("BUILD_HOST");
+
+#[derive(Parser)]
+#[command(name = "tcpclient")]
+#[command(about = "TCP client with separate control and data planes")]
+pub struct TcpClientCli {
+    /// Server hostname or IP for control plane (used for SNI)
+    #[arg(long)]
+    server: String,
+    
+    /// Server port for control plane (TLS) (e.g., 4235)
+    #[arg(long, default_value = "1107")]
+    control_port: u16,
+    
+    /// Server port for data plane (plain TCP) (e.g., 4236)
+    #[arg(long, default_value = "1108")]
+    data_port: u16,
+    
+    /// TUN device name
+    #[arg(long, default_value = "rustvpn")]
+    device: String,
+    
+    /// CA bundle file (PEM format) for validating server certificates
+    #[arg(long, default_value = "ca.pem")]
+    ca_bundle: String,
+    
+    /// Client certificate file (PEM format)
+    #[arg(long, default_value = "client.pem")]
+    client_cert: String,
+    
+    /// Client private key file (PEM format)
+    #[arg(long, default_value = "client.key")]
+    client_key: String,
+    
+    /// Optional: Expected peer (server) certificate common name (CN)
+    #[arg(long)]
+    peer_cn: Option<String>,
+    
+    /// Number of bidirectional streams to use (default: 30)
+    #[arg(long, default_value = "5")]
+    stream_count: usize,
+    
+    /// MTU for TUN device (100-1500, default: 1500)
+    #[arg(long, default_value = "1500")]
+    mtu: u16,
+    
+    /// IPv4 address with CIDR to assign to TUN device (e.g., 192.168.3.2/24)
+    #[arg(long)]
+    ipv4: Option<String>,
+    
+    /// IPv6 address with prefix length to assign to TUN device (e.g., 2001:db8::1/64)
+    #[arg(long)]
+    ipv6: Option<String>,
+    
+    /// Local routes to set up (CIDR format, can be specified multiple times)
+    #[arg(long)]
+    route: Vec<String>,
+}
+
+async fn run_client_inner(
+    child_context: tokio_tree_context::Context,
+    stats: Arc<Stats>,
+    control_server: String,
+    control_port: u16,
+    data_server: String,
+    data_port: u16,
+    tun: Arc<tun_rs::AsyncDevice>,
+    ca_bundle: String,
+    client_cert: String,
+    client_key: String,
+    peer_cn: Option<String>,
+    stream_count: usize,
+    mtu: u16,
+) -> Result<()> {
+    let mut child_context = child_context;
+
+    // Build TLS connector for control plane
+    debug!("Building TLS connector for control plane");
+    let ca_store = quicutil::load_ca_bundle_tcp_tokio(&ca_bundle)?;
+    let client_cert_chain = quicutil::load_cert_chain(&client_cert)?;
+    let client_private_key = quicutil::load_private_key(&client_key)?;
+    
+    // Convert for tokio_rustls
+    let certs: Vec<tokio_rustls::rustls::pki_types::CertificateDer<'static>> = client_cert_chain
+        .into_iter()
+        .map(|c| tokio_rustls::rustls::pki_types::CertificateDer::from(c.as_ref().to_vec()))
+        .collect();
+    
+    let key_der = match client_private_key {
+        rustls_pki_types::PrivateKeyDer::Pkcs8(k) => tokio_rustls::rustls::pki_types::PrivateKeyDer::Pkcs8(
+            tokio_rustls::rustls::pki_types::PrivatePkcs8KeyDer::from(k.secret_pkcs8_der().to_vec())
+        ),
+        rustls_pki_types::PrivateKeyDer::Pkcs1(k) => tokio_rustls::rustls::pki_types::PrivateKeyDer::Pkcs1(
+            tokio_rustls::rustls::pki_types::PrivatePkcs1KeyDer::from(k.secret_pkcs1_der().to_vec())
+        ),
+        rustls_pki_types::PrivateKeyDer::Sec1(k) => tokio_rustls::rustls::pki_types::PrivateKeyDer::Sec1(
+            tokio_rustls::rustls::pki_types::PrivateSec1KeyDer::from(k.secret_sec1_der().to_vec())
+        ),
+        _ => anyhow::bail!("Unsupported private key format"),
+    };
+    
+    let client_config = tokio_rustls::rustls::ClientConfig::builder()
+        .with_root_certificates(ca_store)
+        .with_client_auth_cert(certs, key_der)
+        .map_err(|e| anyhow::anyhow!("Failed to create rustls client config: {:?}", e))?;
+    
+    let connector = TlsConnector::from(Arc::new(client_config));
+    
+    // Resolve control plane address
+    let mut control_addrs = tokio::net::lookup_host((control_server.as_str(), control_port)).await
+        .with_context(|| format!("Failed to resolve {}:{}", control_server, control_port))?;
+    let control_addr = control_addrs.next().context("No addresses found for control server")?;
+    
+    // Resolve data plane address
+    let mut data_addrs = tokio::net::lookup_host((data_server.as_str(), data_port)).await
+        .with_context(|| format!("Failed to resolve {}:{}", data_server, data_port))?;
+    let data_addr = data_addrs.next().context("No addresses found for data server")?;
+    
+    info!("Connecting to control plane at {} (server={})", control_addr, control_server);
+    
+    // Connect to control plane
+    let tcp_stream = TcpStream::connect(control_addr).await
+        .with_context(|| format!("Failed to connect to control plane {}", control_addr))?;
+    
+    // Set TCP_NODELAY on control plane stream
+    if let Err(e) = tcp_stream.set_nodelay(true) {
+        warn!("Failed to set TCP_NODELAY on control plane stream: {}", e);
+    }
+    
+    let server_name: ServerName<'static> = control_server.clone().try_into()
+        .map_err(|_| anyhow::anyhow!("Invalid server name: {}", control_server))?;
+    let server_name_clone = server_name.clone();
+    let mut tls_stream = connector.connect(server_name_clone, tcp_stream).await
+        .with_context(|| format!("Failed to establish TLS connection to control plane"))?;
+    
+    debug!("Control plane TLS handshake completed");
+    info!("Control plane connection established to {} (server={})", control_addr, control_server);
+    
+    // Validate peer CN if required
+    if let Some(ref expected_cn) = peer_cn {
+        debug!("Validating peer CN, expected: {}", expected_cn);
+        let peer_certs = tls_stream.get_ref().1.peer_certificates();
+        if let Some(certs) = peer_certs {
+            if !certs.is_empty() {
+                let first_cert = rustls_pki_types::CertificateDer::from(
+                    certs[0].as_ref().to_vec()
+                );
+                match quicutil::extract_cn_from_cert(&first_cert) {
+                    Ok(cn) => {
+                        if cn != *expected_cn {
+                            anyhow::bail!("CN mismatch: expected '{}', got '{}'", expected_cn, cn);
+                        }
+                        info!("Peer CN validated: {}", expected_cn);
+                    }
+                    Err(e) => {
+                        anyhow::bail!("Error extracting CN: {}", e);
+                    }
+                }
+            } else {
+                anyhow::bail!("No peer certificates available");
+            }
+        } else {
+            anyhow::bail!("Peer certificates not available");
+        }
+    }
+
+    // Config exchange on control plane
+    info!("Performing config exchange with server");
+    let my_token = utils::generate_token();
+    info!("generated my token: {}", my_token);
+    let params_map = utils::do_config_exchange_client_tcp(
+        &mut tls_stream,
+        BUILD_BRANCH,
+        &my_token,
+        stream_count,
+        mtu,
+    ).await?;
+    info!("Client received server config: {:?}", params_map);
+    let server_token = params_map.get(utils::PARAM_TOKEN).unwrap();
+    info!("Server token: {}", server_token);
+    // Validate config exchange
+    utils::validate_config_exchange(
+        BUILD_BRANCH,
+        stream_count,
+        mtu,
+        &params_map,
+    )?;
+    
+    info!("Client intended number_of_streams={}", stream_count);
+    info!("Config validation passed, negotiated number_of_streams={}", stream_count);
+    
+    // Now connect to data plane
+    debug!("Connecting {} streams to data plane", stream_count);
+    let connect_context = child_context.new_child_context();
+    let raw_data_streams = utils::must_connect_n_connections_timeout(
+        connect_context,
+        &connector,
+        data_addr,
+        server_name,
+        stream_count,
+        &my_token,
+        &server_token,
+        Duration::from_secs(max(5, 2 * stream_count as u64)),
+    ).await?;
+    if raw_data_streams.is_empty() {
+        error!("Failed to connect any data plane streams");
+        anyhow::bail!("Failed to connect any data plane streams");
+    }
+    
+    if raw_data_streams.len() < stream_count {
+        warn!("Only connected {} out of {} data plane streams", raw_data_streams.len(), stream_count);
+    } else {
+        info!("Successfully connected all {} data plane streams", raw_data_streams.len());
+    }
+    
+    let data_streams_inner1 = raw_data_streams.into_iter()
+        .map(|(stream, _)| stream)
+        .map(|stream| tokio::io::split(stream))
+        .collect();
+
+    // Start data forwarding
+    let child_context_inner = child_context.new_child_context();
+    let jh = child_context.spawn(utils::run_pipes_generic(
+        child_context_inner,
+        stats.clone(),
+        tun.clone(),
+        data_streams_inner1,
+        mtu,
+    ));
+    let result = jh.await;
+    if let Err(e) = result {
+        error!("Error running pipes: {}", e);
+        return Err(e.into());
+    }
+    Ok(())
+}
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    // Initialize tracing subscriber
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        )
+        .init();
+
+    // Install crypto provider before any Rustls operations
+    rustls::crypto::aws_lc_rs::default_provider()
+        .install_default()
+        .map_err(|e| anyhow::anyhow!("Failed to install default crypto provider: {:?}", e))?;
+    
+    info!("TCP Client starting: build_id={}, time={}, host={}", BUILD_BRANCH, BUILD_TIME, BUILD_HOST);
+    let cli = TcpClientCli::parse();
+    validate_client_args(&cli)?;
+    // Handle data plane (blocking)
+    run_client(
+        cli.server.clone(),
+        cli.control_port,
+        cli.server,
+        cli.data_port,
+        cli.device, 
+        cli.ca_bundle, 
+        cli.client_cert, 
+        cli.client_key, 
+        cli.peer_cn,
+        cli.stream_count,
+        cli.mtu,
+        cli.ipv4,
+        cli.ipv6,
+        cli.route
+    ).await?;
+    
+    Ok(())
+}
+
+pub async fn run_client(
+    control_server: String,
+    control_port: u16,
+    data_server: String,
+    data_port: u16,
+    device_name: String,
+    ca_bundle: String,
+    client_cert: String,
+    client_key: String,
+    peer_cn: Option<String>,
+    stream_count: usize,
+    mtu: u16,
+    ipv4: Option<String>,
+    ipv6: Option<String>,
+    local_routes: Vec<String>,
+) -> Result<()> {
+    let mut tree_context = tokio_tree_context::Context::new();
+    let stats = Arc::new(Stats::new());
+    stats::start_stats_reporting(&mut tree_context, stats.clone()).await;
+    
+    let tun = tunutil::create_tun(device_name, mtu, ipv4, ipv6, local_routes).await?;
+    let tun = Arc::new(tun);
+    // Create TUN device once (never recreated on reconnect)
+    
+    // Main reconnection loop - TUN device and routes are never touched
+    loop {
+        let child_context = tree_context.new_child_context();
+        let result = run_client_inner(
+            child_context,
+            stats.clone(),
+            control_server.clone(),
+            control_port,
+            data_server.clone(),
+            data_port,
+            tun.clone(),
+            ca_bundle.clone(), 
+            client_cert.clone(), 
+            client_key.clone(), 
+            peer_cn.clone(), 
+            stream_count,
+            mtu,
+        ).await;
+        if let Err(e) = result {
+            error!("Error running client: {}", e);
+        } else {
+            debug!("Client loop iteration completed successfully");
+        }
+        info!("Sleeping for 5 seconds before reconnecting...");
+        tokio::time::sleep(Duration::from_secs(5)).await;
+    }
+}
+
+pub fn validate_client_args(args: &TcpClientCli) -> Result<(), anyhow::Error> {
+    debug!("Validating client arguments");
+    utils::validate_ipv4_cidr(args.ipv4.clone())?;
+    utils::validate_ipv6_cidr(args.ipv6.clone())?;
+    debug!("Client arguments validated");
+    Ok(())
+}
+

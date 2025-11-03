@@ -2,12 +2,11 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use std::{sync::Arc, time::Duration};
 use tracing::{debug, error, info, warn};
-use tun_rs::DeviceBuilder;
 pub mod packetutil;
 pub mod utils;
 pub mod quicutil;
 pub mod stats;
-use utils::{copy_read_to_tun_multi, copy_tun_to_write_multi};
+pub mod tunutil;
 use stats::Stats;
 
 const BUILD_BRANCH: &str = env!("BUILD_BRANCH");
@@ -23,31 +22,31 @@ pub struct ClientCli {
     server: String,
     
     /// Server port (e.g., 4234)
-    #[arg(long)]
+    #[arg(long, default_value = "1105")]
     port: u16,
     
     /// TUN device name
-    #[arg(short, long)]
+    #[arg(long, default_value = "rustvpn")]
     device: String,
     
     /// CA bundle file (PEM format) for validating server certificates
-    #[arg(long)]
+    #[arg(long, default_value = "ca.pem")]
     ca_bundle: String,
     
     /// Client certificate file (PEM format)
-    #[arg(long)]
+    #[arg(long, default_value = "client.pem")]
     client_cert: String,
     
     /// Client private key file (PEM format)
-    #[arg(long)]
+    #[arg(long, default_value = "client.key")]
     client_key: String,
     
     /// Optional: Expected peer (server) certificate common name (CN)
     #[arg(long)]
     peer_cn: Option<String>,
     
-    /// Number of bidirectional streams to use (default: 30)
-    #[arg(long, default_value = "30")]
+    /// Number of bidirectional streams to use (default: 5)
+    #[arg(long, default_value = "5")]
     stream_count: usize,
     
     /// MTU for TUN device (100-1500, default: 1500)
@@ -62,9 +61,9 @@ pub struct ClientCli {
     #[arg(long)]
     ipv6: Option<String>,
     
-    /// Remote routes to advertise (CIDR format, can be specified multiple times)
+    /// Local routes to set up (CIDR format, can be specified multiple times)
     #[arg(long)]
-    remote_route: Vec<String>,
+    route: Vec<String>,
 }
 
 // quicutil provides certificate helpers and config builders
@@ -74,16 +73,13 @@ async fn run_client_inner(
     stats: Arc<Stats>,
     server: String,
     port: u16,
-    device_name: String,
+    tun: Arc<tun_rs::AsyncDevice>,
     ca_bundle: String,
     client_cert: String,
     client_key: String,
     peer_cn: Option<String>,
     stream_count: usize,
     mtu: u16,
-    ipv4: Option<String>,
-    ipv6: Option<String>,
-    remote_routes: Vec<String>,
 ) -> Result<()> {
     let mut child_context = child_context;
     // Resolve remote address
@@ -126,50 +122,10 @@ async fn run_client_inner(
         info!("Peer CN validated: {}", expected_cn);
     }
 
-    // Initialization config exchange over a temporary stream
-    let mut client_routes: Vec<String> = Vec::new();
-    // Add local IP routes if provided
-    if let Some(ref ipv4_cidr) = ipv4 {
-        match utils::ipv4_cidr_to_network_route(ipv4_cidr) {
-            Ok(route) => client_routes.push(route),
-            Err(e) => {
-                error!("Failed to convert IPv4 CIDR '{}' to network route: {}", ipv4_cidr, e);
-                return Err(e.context(format!("Invalid IPv4 CIDR: {}", ipv4_cidr)));
-            }
-        }
-    }
-    if let Some(ref ipv6_cidr) = ipv6 {
-        match utils::ipv6_cidr_to_network_route(ipv6_cidr) {
-            Ok(route) => client_routes.push(route),
-            Err(e) => {
-                error!("Failed to convert IPv6 CIDR '{}' to network route: {}", ipv6_cidr, e);
-                return Err(e.context(format!("Invalid IPv6 CIDR: {}", ipv6_cidr)));
-            }
-        }
-    }
-    // Add and normalize remote routes
-    let mut route_errors = Vec::new();
-    for route in remote_routes {
-        match utils::normalize_cidr_route(&route) {
-            Ok(normalized) => client_routes.push(normalized),
-            Err(e) => {
-                route_errors.push((route.clone(), e));
-            }
-        }
-    }
-    
-    if !route_errors.is_empty() {
-        for (route, err) in &route_errors {
-            error!("Failed to normalize route '{}': {}", route, err);
-        }
-        anyhow::bail!(
-            "Failed to normalize {} out of {} remote route(s). Please check the route format (e.g., 192.168.0.0/24 or 2001:db8::/64)",
-            route_errors.len(),
-            route_errors.len() + client_routes.len()
-        );
-    }
+    // Config exchange (no routes - routes are local only)
     debug!("Performing config exchange with server");
-    let params_map = utils::do_config_exchange_client(&connection, BUILD_BRANCH, stream_count, mtu, &client_routes).await?;
+    let token = utils::generate_token();
+    let params_map = utils::do_config_exchange_client(&connection, &token, BUILD_BRANCH, stream_count, mtu).await?;
     debug!("Client received server config: {:?}", params_map);
     
     // Validate config exchange
@@ -182,96 +138,36 @@ async fn run_client_inner(
     
     debug!("Client intended number_of_streams={}", stream_count);
     info!("Config validation passed, negotiated number_of_streams={}", stream_count);
-    
-    // Create TUN device using async IO
-    let mut builder = DeviceBuilder::new()
-        .mtu(mtu)
-        .name(&device_name)
-        .multi_queue(true);
-    
-    // Assign IPv4 address if provided
-    if let Some(ref ipv4_cidr) = ipv4 {
-        let (addr, mask) = utils::parse_ipv4_cidr(ipv4_cidr)?;
-        builder = builder.ipv4(addr, mask, None);
-        info!("Will assign IPv4 {} to device {}", ipv4_cidr, device_name);
-    }
-    
-    // Assign IPv6 address if provided
-    if let Some(ref ipv6_cidr) = ipv6 {
-        let (addr, prefix) = utils::parse_ipv6_cidr(ipv6_cidr)?;
-        builder = builder.ipv6(addr, prefix);
-        info!("Will assign IPv6 {} to device {}", ipv6_cidr, device_name);
-    }
-    
-    let tun = Arc::new(
-        builder
-            .build_async()
-            .context("Failed to create TUN device")?
-    );
-    
-    info!("Created TUN device: {}", device_name);
-    let if_index = tun.if_index()
-        .context(format!("TUN device '{}' does not have an interface index", device_name))?;
-    debug!("TUN device ifindex: {}", if_index);
-    // Apply routes
-    let apply_result = utils::apply_routes(if_index, &params_map).await;
-    if let Err(e) = apply_result {
-        error!("Error applying routes: {}", e);
-        return Err(e.into());
-    }
-    info!("Routes applied successfully");
-    let (send_streams, recv_streams) = utils::open_bidi_streams_with_handshake(
+    let streams = utils::open_bidi_streams_with_handshake(
         &connection,
         stream_count,
         utils::handshake_client_adapter,
     ).await?;
     
-    if send_streams.is_empty() {
+    if streams.is_empty() {
         error!("Failed to open any streams");
         anyhow::bail!("Failed to open any streams");
     }
     
-    if send_streams.len() < stream_count {
-        warn!("Only opened {} out of {} streams", send_streams.len(), stream_count);
+    if streams.len() < stream_count {
+        warn!("Only opened {} out of {} streams", streams.len(), stream_count);
     } else {
-        info!("Successfully opened all {} streams", send_streams.len());
+        info!("Successfully opened all {} streams", streams.len());
     }
     // Start two tasks for bidirectional forwarding
-    let child_context1 = child_context.new_child_context();
-    let child_context2 = child_context.new_child_context();
-    let jh1 = child_context.spawn(copy_read_to_tun_multi(
-        child_context1,
+    let child_context_inner = child_context.new_child_context();
+    let jh = child_context.spawn(utils::run_pipes_generic(
+        child_context_inner,
         stats.clone(),
-        recv_streams,
-        Arc::clone(&tun),
+        tun.clone(),
+        streams,
+        mtu,
     ));
-    
-    let jh2 = child_context.spawn(copy_tun_to_write_multi(
-        child_context2,
-        stats.clone(),
-        send_streams,
-        Arc::clone(&tun),
-    ));
-    
-    info!("Starting bidirectional forwarding tasks");
-    // Wait indefinitely (tasks handle the forwarding)
-    tokio::select! {
-        result = jh1 => {
-            if let Err(e) = result {
-                error!("copy_transport_to_tun task error: {}", e);
-            } else {
-                warn!("copy_transport_to_tun task exited");
-            }
-        },
-        result = jh2 => {
-            if let Err(e) = result {
-                error!("copy_tun_to_transport task error: {}", e);
-            } else {
-                warn!("copy_tun_to_transport task exited");
-            }
-        }
+    let result = jh.await;
+    if let Err(e) = result {
+        error!("Error running pipes: {}", e);
+        return Err(e.into());
     }
-    
     Ok(())
 }
 
@@ -308,7 +204,7 @@ async fn main() -> Result<()> {
         cli.mtu,
         cli.ipv4,
         cli.ipv6,
-        cli.remote_route
+        cli.route
     ).await?;
     
     Ok(())
@@ -328,11 +224,17 @@ pub async fn run_client(
     mtu: u16,
     ipv4: Option<String>,
     ipv6: Option<String>,
-    remote_routes: Vec<String>,
+    local_routes: Vec<String>,
 ) -> Result<()> {
     let mut tree_context = tokio_tree_context::Context::new();
     let stats = Arc::new(Stats::new());
     stats::start_stats_reporting(&mut tree_context, stats.clone()).await;
+    
+    let tun = tunutil::create_tun(device_name, mtu, ipv4, ipv6, local_routes).await?;
+    // Create TUN device once (never recreated on reconnect)
+    
+    let tun = Arc::new(tun);
+    // Main reconnection loop - TUN device and routes are never touched
     loop {
         let child_context = tree_context.new_child_context();
         let result = run_client_inner(
@@ -340,16 +242,14 @@ pub async fn run_client(
             stats.clone(),
             server.clone(), 
             port, 
-            device_name.clone(), 
+            tun.clone(),
             ca_bundle.clone(), 
             client_cert.clone(), 
             client_key.clone(), 
             peer_cn.clone(), 
-            stream_count, 
-            mtu, 
-            ipv4.clone(), 
-            ipv6.clone(), 
-            remote_routes.clone()).await;
+            stream_count,
+            mtu,
+        ).await;
         if let Err(e) = result {
             error!("Error running client: {}", e);
         } else {
