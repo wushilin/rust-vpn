@@ -1,13 +1,14 @@
 use anyhow::{Context, Result};
 use chrono::Local;
 use clap::Parser;
-use tokio::sync::mpsc;
+use tokio::sync::{Mutex, mpsc};
 use std::cmp::{max};
+use std::collections::HashMap;
 use std::{sync::Arc};
 use std::time::Duration;
 use tracing::{debug, error, info, warn};
 use tokio::net::{TcpListener, TcpStream};
-use tokio_rustls::{TlsAcceptor, server::TlsStream};
+use tokio_rustls::{server::TlsStream};
 
 pub mod packetutil;
 pub mod quicutil;
@@ -16,29 +17,23 @@ pub mod stats;
 pub mod tunutil;
 use stats::Stats;
 
+use crate::utils::Purpose;
+
 const BUILD_BRANCH: &str = env!("BUILD_BRANCH");
 const BUILD_TIME: &str = env!("BUILD_TIME");
 const BUILD_HOST: &str = env!("BUILD_HOST");
 
-#[derive(Parser)]
+#[derive(Parser, Debug)]
 #[command(name = "tcpserver")]
 #[command(about = "TCP server with separate control and data planes")]
 pub struct TcpServerCli {
     /// Bind address for control plane (TLS) (e.g., 0.0.0.0)
     #[arg(long, default_value = "0.0.0.0")]
-    control_bind_address: String,
+    bind_address: String,
 
     /// Bind port for control plane (TLS) (e.g., 4235)
     #[arg(long, default_value = "1107")]
-    control_port: u16,
-
-    /// Bind address for data plane (plain TCP) (e.g., 0.0.0.0)
-    #[arg(long, default_value = "0.0.0.0")]
-    data_bind_address: String,
-
-    /// Bind port for data plane (plain TCP) (e.g., 4236)
-    #[arg(long, default_value = "1108")]
-    data_port: u16,
+    port: u16,
 
     /// TUN device name
     #[arg(short, long, default_value = "rustvpn")]
@@ -85,10 +80,8 @@ pub struct TcpServerCli {
 async fn run_server_indefinitely(
     tree_context: tokio_tree_context::Context,
     stats: Arc<Stats>,
-    control_bind_address: String,
-    control_port: u16,
-    data_bind_address: String,
-    data_port: u16,
+    bind_address: String,
+    port: u16,
     tun: Arc<tun_rs::AsyncDevice>,
     ca_bundle: String,
     server_cert: String,
@@ -101,78 +94,38 @@ async fn run_server_indefinitely(
     
     // Build TLS acceptor for control plane
     debug!("Building TLS acceptor for control plane");
-    let cert_chain = quicutil::load_cert_chain(&server_cert)?;
-    let key = quicutil::load_private_key(&server_key)?;
+    let acceptor = utils::build_tls_acceptor(&ca_bundle, &server_cert, &server_key)?;
     
-    // Convert cert_chain and key for tokio_rustls
-    let certs: Vec<tokio_rustls::rustls::pki_types::CertificateDer<'static>> = cert_chain
-        .into_iter()
-        .map(|c| tokio_rustls::rustls::pki_types::CertificateDer::from(c.as_ref().to_vec()))
-        .collect();
-    
-    let key_der = match key {
-        rustls_pki_types::PrivateKeyDer::Pkcs8(k) => tokio_rustls::rustls::pki_types::PrivateKeyDer::Pkcs8(
-            tokio_rustls::rustls::pki_types::PrivatePkcs8KeyDer::from(k.secret_pkcs8_der().to_vec())
-        ),
-        rustls_pki_types::PrivateKeyDer::Pkcs1(k) => tokio_rustls::rustls::pki_types::PrivateKeyDer::Pkcs1(
-            tokio_rustls::rustls::pki_types::PrivatePkcs1KeyDer::from(k.secret_pkcs1_der().to_vec())
-        ),
-        rustls_pki_types::PrivateKeyDer::Sec1(k) => tokio_rustls::rustls::pki_types::PrivateKeyDer::Sec1(
-            tokio_rustls::rustls::pki_types::PrivateSec1KeyDer::from(k.secret_sec1_der().to_vec())
-        ),
-        _ => anyhow::bail!("Unsupported private key format"),
-    };
-    
-    let ca_store = quicutil::load_ca_bundle_tcp_tokio(&ca_bundle)?;
-    let client_verifier = tokio_rustls::rustls::server::WebPkiClientVerifier::builder(ca_store.into())
-        .build()
-        .map_err(|e| anyhow::anyhow!("Failed to create client cert verifier: {:?}", e))?;
-    
-    let server_config = tokio_rustls::rustls::ServerConfig::builder()
-        .with_client_cert_verifier(client_verifier)
-        .with_single_cert(certs, key_der)
-        .map_err(|e| anyhow::anyhow!("Failed to create rustls server config: {:?}", e))?;
-    
-    let acceptor = TlsAcceptor::from(Arc::new(server_config));
-    
-    let control_bind_addr = format!("{}:{}", control_bind_address, control_port)
+    let bind_addr = format!("{}:{}", bind_address, port)
         .parse::<std::net::SocketAddr>()
         .context("Failed to parse control bind address")?;
     
-    let data_bind_addr = format!("{}:{}", data_bind_address, data_port)
-        .parse::<std::net::SocketAddr>()
-        .context("Failed to parse data bind address")?;
-
-    debug!("Creating TCP listeners");
-    let control_listener = TcpListener::bind(control_bind_addr).await
+    info!("Creating TCP listeners");
+    let control_listener = TcpListener::bind(bind_addr).await
         .context("Failed to bind control plane listener")?;
     
     let (control_sender, mut control_receiver) = mpsc::channel::<(TlsStream<TcpStream>, std::net::SocketAddr)>(100);
     let (data_sender, mut data_receiver) = mpsc::channel::<(TlsStream<TcpStream>, std::net::SocketAddr)>(100);
     let control_context = tree_context.new_child_context();
+    
+    // Send connections to the control and data plane to the acceptance loop
+    let mut senders = HashMap::<String, mpsc::Sender<(TlsStream<TcpStream>, std::net::SocketAddr)>>::new();
+    senders.insert(Purpose::ControlPlane.into(), control_sender);
+    senders.insert(Purpose::DataPlane.into(), data_sender);
+
+    let senders = Arc::new(Mutex::new(senders));
+
     tree_context.spawn(utils::run_tls_acceptance_loop(
-        "ControlPlane".into(),
+        "ControlAndDataPlane".into(),
         control_context,
         control_listener,
         acceptor.clone(),
         peer_cn.clone(),
-        control_sender,
+        senders.clone(),
     ));
 
-    let data_listener = TcpListener::bind(data_bind_addr).await
-        .context("Failed to bind data plane listener")?;
-    let data_context = tree_context.new_child_context();
-    tree_context.spawn(utils::run_tls_acceptance_loop(
-        "DataPlane".into(),
-        data_context,
-        data_listener,
-        acceptor.clone(),
-        peer_cn.clone(),
-        data_sender,
-    ));
 
-    info!("Control plane listening on {}", control_bind_addr);
-    info!("Data plane listening on {}", data_bind_addr);
+    info!("ControlAndDataPlane listening on {}", bind_addr);
 
     loop {
         info!("Waiting for connection");
@@ -185,7 +138,6 @@ async fn run_server_indefinitely(
             continue;
         }
         let (mut tls_stream, control_peer_addr) = receive_result.unwrap();
-
         
         stats.increment_reconnections();
         stats.set_last_reconnection_time(Local::now());
@@ -194,7 +146,7 @@ async fn run_server_indefinitely(
         // Config exchange on control plane
         debug!("Performing config exchange with client");
         let my_token = utils::generate_token();
-        info!("generated my token: {}", my_token);
+        info!("Generated my token: {}", my_token);
         let client_params = utils::do_config_exchange_server_tcp(
             &mut tls_stream,
             BUILD_BRANCH,
@@ -287,15 +239,17 @@ async fn main() -> Result<()> {
         "TCP Server starting: build_id={}, time={}, host={}",
         BUILD_BRANCH, BUILD_TIME, BUILD_HOST
     );
+    info!("Parsing server arguments");
     let cli = TcpServerCli::parse();
-
+    info!("Server arguments parsed: {:?}", cli);
+    info!("Validating server arguments");
     validate_server_args(&cli)?;
+    info!("Server arguments validated");
     // Handle data plane (blocking)
+    info!("Starting server");
     run_server(
-        cli.control_bind_address,
-        cli.control_port,
-        cli.data_bind_address,
-        cli.data_port,
+        cli.bind_address,
+        cli.port,
         cli.device,
         cli.ca_bundle,
         cli.server_cert,
@@ -313,10 +267,8 @@ async fn main() -> Result<()> {
 }
 
 pub async fn run_server(
-    control_bind_address: String,
-    control_port: u16,
-    data_bind_address: String,
-    data_port: u16,
+    bind_address: String,
+    port: u16,
     device_name: String,
     ca_bundle: String,
     server_cert: String,
@@ -332,16 +284,15 @@ pub async fn run_server(
     let stats = Arc::new(Stats::new());
     stats::start_stats_reporting(&mut tree_context, stats.clone()).await;
     
+    info!("Creating TUN device");
     let tun = tunutil::create_tun(device_name, mtu, ipv4, ipv6, local_routes).await?;
+    info!("TUN device created");
     let tun = Arc::new(tun);
-    // Create TUN device once (never recreated on reconnect)
     let result = run_server_indefinitely(
         tree_context.new_child_context(),
         stats.clone(),
-        control_bind_address.clone(), 
-        control_port,
-        data_bind_address.clone(),
-        data_port,
+        bind_address.clone(), 
+        port,
         tun,
         ca_bundle.clone(),  
         server_cert.clone(),
@@ -350,6 +301,7 @@ pub async fn run_server(
         stream_count,
         mtu,
     ).await;
+
     if let Err(e) = result {
         error!("Error running server: {}", e);
         return Err(e.into());

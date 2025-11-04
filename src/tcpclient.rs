@@ -1,9 +1,7 @@
-use anyhow::{Context, Result};
+use anyhow::Result;
 use clap::Parser;
 use std::{cmp::{max}, sync::Arc, time::Duration};
 use tracing::{debug, error, info, warn};
-use tokio::net::TcpStream;
-use tokio_rustls::TlsConnector;
 use rustls_pki_types::ServerName;
 
 pub mod packetutil;
@@ -27,11 +25,7 @@ pub struct TcpClientCli {
     
     /// Server port for control plane (TLS) (e.g., 4235)
     #[arg(long, default_value = "1107")]
-    control_port: u16,
-    
-    /// Server port for data plane (plain TCP) (e.g., 4236)
-    #[arg(long, default_value = "1108")]
-    data_port: u16,
+    port: u16,
     
     /// TUN device name
     #[arg(long, default_value = "rustvpn")]
@@ -77,10 +71,8 @@ pub struct TcpClientCli {
 async fn run_client_inner(
     child_context: tokio_tree_context::Context,
     stats: Arc<Stats>,
-    control_server: String,
-    control_port: u16,
-    data_server: String,
-    data_port: u16,
+    server: String,
+    port: u16,
     tun: Arc<tun_rs::AsyncDevice>,
     ca_bundle: String,
     client_cert: String,
@@ -93,93 +85,17 @@ async fn run_client_inner(
 
     // Build TLS connector for control plane
     debug!("Building TLS connector for control plane");
-    let ca_store = quicutil::load_ca_bundle_tcp_tokio(&ca_bundle)?;
-    let client_cert_chain = quicutil::load_cert_chain(&client_cert)?;
-    let client_private_key = quicutil::load_private_key(&client_key)?;
-    
-    // Convert for tokio_rustls
-    let certs: Vec<tokio_rustls::rustls::pki_types::CertificateDer<'static>> = client_cert_chain
-        .into_iter()
-        .map(|c| tokio_rustls::rustls::pki_types::CertificateDer::from(c.as_ref().to_vec()))
-        .collect();
-    
-    let key_der = match client_private_key {
-        rustls_pki_types::PrivateKeyDer::Pkcs8(k) => tokio_rustls::rustls::pki_types::PrivateKeyDer::Pkcs8(
-            tokio_rustls::rustls::pki_types::PrivatePkcs8KeyDer::from(k.secret_pkcs8_der().to_vec())
-        ),
-        rustls_pki_types::PrivateKeyDer::Pkcs1(k) => tokio_rustls::rustls::pki_types::PrivateKeyDer::Pkcs1(
-            tokio_rustls::rustls::pki_types::PrivatePkcs1KeyDer::from(k.secret_pkcs1_der().to_vec())
-        ),
-        rustls_pki_types::PrivateKeyDer::Sec1(k) => tokio_rustls::rustls::pki_types::PrivateKeyDer::Sec1(
-            tokio_rustls::rustls::pki_types::PrivateSec1KeyDer::from(k.secret_sec1_der().to_vec())
-        ),
-        _ => anyhow::bail!("Unsupported private key format"),
-    };
-    
-    let client_config = tokio_rustls::rustls::ClientConfig::builder()
-        .with_root_certificates(ca_store)
-        .with_client_auth_cert(certs, key_der)
-        .map_err(|e| anyhow::anyhow!("Failed to create rustls client config: {:?}", e))?;
-    
-    let connector = TlsConnector::from(Arc::new(client_config));
-    
-    // Resolve control plane address
-    let mut control_addrs = tokio::net::lookup_host((control_server.as_str(), control_port)).await
-        .with_context(|| format!("Failed to resolve {}:{}", control_server, control_port))?;
-    let control_addr = control_addrs.next().context("No addresses found for control server")?;
-    
-    // Resolve data plane address
-    let mut data_addrs = tokio::net::lookup_host((data_server.as_str(), data_port)).await
-        .with_context(|| format!("Failed to resolve {}:{}", data_server, data_port))?;
-    let data_addr = data_addrs.next().context("No addresses found for data server")?;
-    
-    info!("Connecting to control plane at {} (server={})", control_addr, control_server);
-    
-    // Connect to control plane
-    let tcp_stream = TcpStream::connect(control_addr).await
-        .with_context(|| format!("Failed to connect to control plane {}", control_addr))?;
-    
-    // Set TCP_NODELAY on control plane stream
-    if let Err(e) = tcp_stream.set_nodelay(true) {
-        warn!("Failed to set TCP_NODELAY on control plane stream: {}", e);
-    }
-    
-    let server_name: ServerName<'static> = control_server.clone().try_into()
-        .map_err(|_| anyhow::anyhow!("Invalid server name: {}", control_server))?;
-    let server_name_clone = server_name.clone();
-    let mut tls_stream = connector.connect(server_name_clone, tcp_stream).await
-        .with_context(|| format!("Failed to establish TLS connection to control plane"))?;
-    
-    debug!("Control plane TLS handshake completed");
-    info!("Control plane connection established to {} (server={})", control_addr, control_server);
-    
-    // Validate peer CN if required
-    if let Some(ref expected_cn) = peer_cn {
-        debug!("Validating peer CN, expected: {}", expected_cn);
-        let peer_certs = tls_stream.get_ref().1.peer_certificates();
-        if let Some(certs) = peer_certs {
-            if !certs.is_empty() {
-                let first_cert = rustls_pki_types::CertificateDer::from(
-                    certs[0].as_ref().to_vec()
-                );
-                match quicutil::extract_cn_from_cert(&first_cert) {
-                    Ok(cn) => {
-                        if cn != *expected_cn {
-                            anyhow::bail!("CN mismatch: expected '{}', got '{}'", expected_cn, cn);
-                        }
-                        info!("Peer CN validated: {}", expected_cn);
-                    }
-                    Err(e) => {
-                        anyhow::bail!("Error extracting CN: {}", e);
-                    }
-                }
-            } else {
-                anyhow::bail!("No peer certificates available");
-            }
-        } else {
-            anyhow::bail!("Peer certificates not available");
-        }
-    }
+    let connector = utils::build_tls_connector(&ca_bundle, &client_cert, &client_key)?;
+    let server_clone = server.clone();
+    let server_name = ServerName::try_from(server_clone).unwrap();
+    let (mut tls_stream, local_addr) = utils::connect_tls_for_control_plane(
+        server.clone(),
+        port,
+        server_name.clone(),
+        connector.clone(),
+        peer_cn.clone(),
+    ).await?;
+    info!("Control plane connection established to {}:{} with local address {}", server, port, local_addr);
 
     // Config exchange on control plane
     info!("Performing config exchange with server");
@@ -209,11 +125,13 @@ async fn run_client_inner(
     // Now connect to data plane
     debug!("Connecting {} streams to data plane", stream_count);
     let connect_context = child_context.new_child_context();
-    let raw_data_streams = utils::must_connect_n_connections_timeout(
+    let raw_data_streams = utils::must_connect_n_data_connections_timeout(
         connect_context,
-        &connector,
-        data_addr,
+        connector.clone(),
+        server,
+        port,
         server_name,
+        peer_cn.clone(),
         stream_count,
         &my_token,
         &server_token,
@@ -272,10 +190,8 @@ async fn main() -> Result<()> {
     validate_client_args(&cli)?;
     // Handle data plane (blocking)
     run_client(
-        cli.server.clone(),
-        cli.control_port,
         cli.server,
-        cli.data_port,
+        cli.port,
         cli.device, 
         cli.ca_bundle, 
         cli.client_cert, 
@@ -292,10 +208,8 @@ async fn main() -> Result<()> {
 }
 
 pub async fn run_client(
-    control_server: String,
-    control_port: u16,
-    data_server: String,
-    data_port: u16,
+    server: String,
+    port: u16,
     device_name: String,
     ca_bundle: String,
     client_cert: String,
@@ -321,10 +235,8 @@ pub async fn run_client(
         let result = run_client_inner(
             child_context,
             stats.clone(),
-            control_server.clone(),
-            control_port,
-            data_server.clone(),
-            data_port,
+            server.clone(),
+            port,
             tun.clone(),
             ca_bundle.clone(), 
             client_cert.clone(), 
