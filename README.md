@@ -1,4 +1,4 @@
-# rust-vpn
+# rust-vpn - hyper performance VPN, faster than OpenVPN and simpler
 
 A Point-to-Point VPN implementation in Rust supporting both QUIC and TCP protocols over TUN interfaces with mutual TLS authentication.
 
