@@ -329,3 +329,5 @@ It should perform much better than OpenVPN. In my opinion it works better than o
 - Multiple input support so the TUN read/write speed is no longer a bottleneck. You can use X streams.
 
 
+# About certificates
+Default certificates only covers *.test.com, *.acme.com and *.wushilin.net. Please generate your own certificates using openssl.
