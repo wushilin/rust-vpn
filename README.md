@@ -26,7 +26,7 @@ A Point-to-Point VPN implementation in Rust supporting both QUIC and TCP protoco
 ### QUIC Server Mode
 
 ```bash
-sudo ./target/debug/rust-vpn server \
+sudo ./target/debug/server \
   --bind-address 0.0.0.0 \
   --port 1105 \
   --device rustvpn \
@@ -43,7 +43,7 @@ sudo ./target/debug/rust-vpn server \
 **Arguments:**
 - `-b, --bind-address <BIND_ADDRESS>`: IP address to bind to (IPv4 or IPv6, default: `0.0.0.0`)
 - `--port <PORT>`: Port to listen on (default: 1105)
-- `-d, --device <DEVICE>`: TUN device name (default: `rustvpn`)
+- `--device <DEVICE>`: TUN device name (default: `rustvpn`)
 - `--ca-bundle <CA_BUNDLE>`: CA bundle file (PEM format) for validating client certificates (default: `ca.pem`)
 - `--server-cert <SERVER_CERT>`: Server certificate file (PEM format) (default: `server.pem`)
 - `--server-key <SERVER_KEY>`: Server private key file (PEM format) (default: `server.key`)
@@ -57,7 +57,7 @@ sudo ./target/debug/rust-vpn server \
 ### QUIC Client Mode
 
 ```bash
-sudo ./target/debug/rust-vpn client \
+sudo ./target/debug/client \
   --server server.example.com \
   --port 1105 \
   --device rustvpn \
@@ -74,7 +74,7 @@ sudo ./target/debug/rust-vpn client \
 **Arguments:**
 - `--server <SERVER>`: Server hostname or IP (used for SNI in TLS handshake)
 - `--port <PORT>`: Server port (default: 1105)
-- `-d, --device <DEVICE>`: TUN device name (default: `rustvpn`)
+- `--device <DEVICE>`: TUN device name (default: `rustvpn`)
 - `--ca-bundle <CA_BUNDLE>`: CA bundle file (PEM format) for validating server certificates (default: `ca.pem`)
 - `--client-cert <CLIENT_CERT>`: Client certificate file (PEM format) (default: `client.pem`)
 - `--client-key <CLIENT_KEY>`: Client private key file (PEM format) (default: `client.key`)
@@ -87,16 +87,15 @@ sudo ./target/debug/rust-vpn client \
 
 ### TCP Server Mode
 
-The TCP server uses separate control and data planes:
-- **Control Plane**: TLS connection for configuration exchange (default port: 1107)
-- **Data Plane**: TLS connections for actual data transfer (default port: 1108)
+The TCP server uses separate control and data planes on the same port:
+- **Control Plane**: TLS connection for configuration exchange (identified by purpose string)
+- **Data Plane**: TLS connections for actual data transfer (identified by purpose string)
+- Both planes use the same port and are distinguished by a purpose string sent after TLS handshake
 
 ```bash
-sudo ./target/debug/rust-vpn tcpserver \
-  --control-bind-address 0.0.0.0 \
-  --control-port 1107 \
-  --data-bind-address 0.0.0.0 \
-  --data-port 1108 \
+sudo ./target/debug/tcpserver \
+  --bind-address 0.0.0.0 \
+  --port 1107 \
   --device rustvpn \
   --ca-bundle ca.pem \
   --server-cert server.pem \
@@ -109,10 +108,8 @@ sudo ./target/debug/rust-vpn tcpserver \
 ```
 
 **Arguments:**
-- `--control-bind-address <ADDRESS>`: IP address to bind control plane to (default: `0.0.0.0`)
-- `--control-port <PORT>`: Port for control plane (TLS) (default: 1107)
-- `--data-bind-address <ADDRESS>`: IP address to bind data plane to (default: `0.0.0.0`)
-- `--data-port <PORT>`: Port for data plane (TLS) (default: 1108)
+- `--bind-address <ADDRESS>`: IP address to bind to (default: `0.0.0.0`)
+- `--port <PORT>`: Port for both control and data planes (TLS) (default: 1107)
 - `-d, --device <DEVICE>`: TUN device name (default: `rustvpn`)
 - `--ca-bundle <CA_BUNDLE>`: CA bundle file (PEM format) for validating client certificates (default: `ca.pem`)
 - `--server-cert <SERVER_CERT>`: Server certificate file (PEM format) (default: `server.pem`)
@@ -127,10 +124,9 @@ sudo ./target/debug/rust-vpn tcpserver \
 ### TCP Client Mode
 
 ```bash
-sudo ./target/debug/rust-vpn tcpclient \
+sudo ./target/debug/tcpclient \
   --server server.example.com \
-  --control-port 1107 \
-  --data-port 1108 \
+  --port 1107 \
   --device rustvpn \
   --ca-bundle ca.pem \
   --client-cert client.pem \
@@ -144,9 +140,8 @@ sudo ./target/debug/rust-vpn tcpclient \
 
 **Arguments:**
 - `--server <SERVER>`: Server hostname or IP (used for SNI in TLS handshake)
-- `--control-port <PORT>`: Control plane port (TLS) (default: 1107)
-- `--data-port <PORT>`: Data plane port (TLS) (default: 1108)
-- `-d, --device <DEVICE>`: TUN device name (default: `rustvpn`)
+- `--port <PORT>`: Server port for both control and data planes (TLS) (default: 1107)
+- `--device <DEVICE>`: TUN device name (default: `rustvpn`)
 - `--ca-bundle <CA_BUNDLE>`: CA bundle file (PEM format) for validating server certificates (default: `ca.pem`)
 - `--client-cert <CLIENT_CERT>`: Client certificate file (PEM format) (default: `client.pem`)
 - `--client-key <CLIENT_KEY>`: Client private key file (PEM format) (default: `client.key`)
@@ -173,8 +168,8 @@ This ensures that routes use proper network addresses. Both IPv4 and IPv6 CIDR f
 cargo build
 ```
 
-The build process requires the following environment variables (typically set by build scripts):
-- `BUILD_BRANCH`: Build identifier (used for config exchange validation)
+The build process automatically sets the following environment variables via `build.rs`:
+- `BUILD_BRANCH`: Git commit hash (used for config exchange validation)
 - `BUILD_TIME`: Build timestamp
 - `BUILD_HOST`: Build hostname
 
@@ -193,14 +188,14 @@ Upon initial connection, the client and server exchange configuration parameters
 
 ### TCP Protocol
 
-1. **Control Plane Connection**: Client establishes TLS connection to control plane port
+1. **Control Plane Connection**: Client establishes TLS connection to the server port and sends "ControlPlane" purpose string
 2. **Token Generation**: Both client and server generate authentication tokens
 3. **Config Exchange**: Client and server exchange:
    - `build_id`
    - `token` (authentication token for session)
    - `number_of_streams`
    - `mtu`
-4. **Data Plane Connection**: Client establishes multiple TLS connections to data plane port, each presenting the token for authentication
+4. **Data Plane Connections**: Client establishes multiple TLS connections to the same server port, each sending "DataPlane" purpose string and presenting the token for authentication
 5. **Validation**: Both sides validate exchanged parameters
 
 The format is: `key=value;key=value;...` (semicolon-separated key-value pairs).
@@ -225,8 +220,9 @@ Routes are configured locally on each side:
 - **Transport**: TCP with TLS for both control and data planes
 - **Security**: TLS 1.3 with mutual authentication (using `tokio-rustls` with `rustls` and `aws-lc-rs` provider)
 - **Network**: TUN interface for packet forwarding
-- **Control Plane**: Separate TLS connection for configuration exchange
-- **Data Plane**: Multiple TLS connections for parallel data transfer
+- **Control Plane**: TLS connection for configuration exchange (identified by "ControlPlane" purpose string)
+- **Data Plane**: Multiple TLS connections for parallel data transfer (identified by "DataPlane" purpose string)
+- **Port Sharing**: Both control and data planes use the same port, distinguished by purpose strings sent after TLS handshake
 - **Authentication**: Token-based session authentication for data plane connections
 
 ### Connection Flow
@@ -242,12 +238,12 @@ Routes are configured locally on each side:
 8. **Packet Forwarding**: Packets are forwarded between TUN device and QUIC streams using port-based stream selection for load balancing
 
 **TCP:**
-1. **Control Plane TLS**: Client establishes TLS connection to control plane port
+1. **Control Plane TLS**: Client establishes TLS connection to server port and sends "ControlPlane" purpose string
 2. **Token Generation**: Both sides generate authentication tokens
 3. **Config Exchange**: Client and server exchange configuration and tokens over control plane
 4. **TUN Device**: TUN device is created with optional IPv4/IPv6 addresses
 5. **Route Application**: Routes are applied to the TUN device
-6. **Data Plane Connections**: Client establishes multiple TLS connections to data plane port, authenticating with tokens
+6. **Data Plane Connections**: Client establishes multiple TLS connections to the same server port, each sending "DataPlane" purpose string and authenticating with tokens
 7. **Packet Forwarding**: Packets are forwarded between TUN device and TCP connections
 
 ### Stream Selection
@@ -266,13 +262,13 @@ The application uses `tracing` for structured logging. Set the `RUST_LOG` enviro
 
 ```bash
 # Show info and above
-RUST_LOG=info ./target/debug/rust-vpn server ...
+RUST_LOG=info ./target/debug/server ...
 
 # Show debug and above
-RUST_LOG=debug ./target/debug/rust-vpn server ...
+RUST_LOG=debug ./target/debug/server ...
 
 # Show trace (most verbose)
-RUST_LOG=trace ./target/debug/rust-vpn server ...
+RUST_LOG=trace ./target/debug/server ...
 ```
 
 ## Certificate Requirements
@@ -320,3 +316,16 @@ The application supports IPv6 throughout:
 - **IPv6 packet parsing**: Source and destination ports are extracted from IPv6 packets, including traversal of extension headers
 
 Note: Client currently binds to IPv4 only (`0.0.0.0:0`) but can connect to IPv6 servers. This may be enhanced in future versions to support dual-stack binding.
+
+# Benchmark
+Benchmarks welcome!
+
+It should perform much better than OpenVPN. In my opinion it works better than openvpn in these ways:
+
+- It is much simpler to setup
+- It is much faster than OpenVPN for failure detection. Within 5 seconds, reconnect will be done. your app probalby won't even realize 
+- It is faster. I tried with China - Singapore with Alibaba cloud instance, reaching 200mb/s up/down using iPerf.
+- Super long distance is not as good, but still better than OpenVPN!
+- Multiple input support so the TUN read/write speed is no longer a bottleneck. You can use X streams.
+
+
