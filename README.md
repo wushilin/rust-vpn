@@ -56,7 +56,7 @@ sudo ./target/debug/server \
 ```
 
 **Arguments:**
-- `-b, --bind-address <BIND_ADDRESS>`: IP address to bind to (IPv4 or IPv6, default: `0.0.0.0`)
+- `--bind-address <BIND_ADDRESS>`: IP address to bind to (IPv4 or IPv6, default: `0.0.0.0`)
 - `--port <PORT>`: Port to listen on (default: 1105)
 - `--device <DEVICE>`: TUN device name (default: `rustvpn`)
 - `--ca-bundle <CA_BUNDLE>`: CA bundle file (PEM format) for validating client certificates (default: `ca.pem`)
