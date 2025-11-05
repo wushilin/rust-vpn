@@ -221,24 +221,38 @@ pub async fn do_stream_handshake_server_tcp(
 pub async fn keep_alive(send: SendStream, recv: RecvStream) -> Result<(), anyhow::Error> {
     let mut send = send;
     let mut recv = recv;
+    let mut consecutive_timeouts = 0;
     let mut receive_buffer = [0u8; 200];
     info!("Starting keep-alive loop");
     loop {
-        send.write_all(&[0x00u8]).await?;
+        consecutive_timeouts +=1;
+        let write_result = tokio::time::timeout(Duration::from_secs(1), send.write_all(&[0x00u8])).await;
+        if let Err(e) = write_result {
+            warn!("Error sending keep-alive packet({}): {}", consecutive_timeouts, e);
+        } else {
+            let write_result = write_result.unwrap();
+            if let Err(e) = write_result {
+                warn!("Error sending keep-alive packet({}): {}", consecutive_timeouts, e);
+            } else {
+                // write ok. but we do not reset error count. only reset if we receive data.
+            }
+        }
+        // now we wait for data.
         let result =
             tokio::time::timeout(Duration::from_secs(1), recv.read(&mut receive_buffer)).await;
         if let Err(e) = result {
-            warn!("Timeout receiving keep-alive packet: {}", e);
+            warn!("Timeout receiving keep-alive packet({}): {}", consecutive_timeouts, e);
         } else {
             let result = result.unwrap();
             if let Err(e) = result {
-                warn!("Error receiving keep-alive packet: {}", e);
+                warn!("Error receiving keep-alive packet({}): {}", consecutive_timeouts, e);
             } else {
                 let size = result.unwrap();
                 if let Some(_count) = size {
                     // If we received data, we're good
+                    consecutive_timeouts = 0;
                 } else {
-                    warn!("Error receiving keep-live packet: no data received");
+                    warn!("Error receiving keep-live packet: no data received ({})", consecutive_timeouts);
                 }
             }
         }
@@ -1230,7 +1244,6 @@ pub async fn do_config_exchange_server_tcp(
     Ok(client_params_map)
 }
 
-// TCP version of run_pipes - uses plain TCP streams
 pub async fn run_pipes_generic<R, W>(
     child_context: tokio_tree_context::Context,
     stats: Arc<Stats>,
@@ -1245,6 +1258,7 @@ where
     let mut child_context = child_context;
     let mut join_handles = Vec::new();
     for (i, (read_half, write_half)) in streams.into_iter().enumerate() {
+        let index = i;
         let device_clone = if i == 0 {
             debug!("Using original TUN device for IO for thread {}", i + 1);
             device.clone()
@@ -1254,6 +1268,7 @@ where
             Arc::new(cloned)
         };
         let jh1 = child_context.spawn(copy_generic_to_tun(
+            index,
             stats.clone(),
             read_half,
             device_clone.clone(),
@@ -1261,6 +1276,7 @@ where
         ));
         join_handles.push(jh1);
         let jh2 = child_context.spawn(copy_tun_to_generic(
+            index,
             stats.clone(),
             device_clone,
             write_half,
@@ -1272,15 +1288,16 @@ where
     info!("Spawning {} tasks for IO (sender + receiver).", join_handles.len());
     info!("VPN UP");
     let (result, _index, remaining) = select_all(join_handles).await;
+    let error_index = _index;
     match result {
         Ok(_) => {
-            warn!("One of the IO tasks completed successfully");
+            warn!("Task {} completed", error_index + 1);
         }
         Err(e) => {
-            error!("One of the IO tasks error: {:?}", e);
+            error!("Task {} error: {:?}", error_index, e);
         }
     }
-    for handle in remaining {
+    for (_index, handle) in remaining.into_iter().enumerate() {
         handle.abort();
     }
     info!("All tasks cancelled");
@@ -1288,10 +1305,11 @@ where
     Ok(())
 }
 
-async fn copy_generic_to_tun<R>(stats: Arc<Stats>, read: R, tun: Arc<AsyncDevice>, mtu: u16)
+async fn copy_generic_to_tun<R>(index: usize, stats: Arc<Stats>, read: R, tun: Arc<AsyncDevice>, mtu: u16)
 where
     R: tokio::io::AsyncRead + Unpin + Send + Sync + 'static,
 {
+    let index = index + 1;
     let mut read = read;
     let mut buf = vec![0u8; mtu as usize + 5];
     loop {
@@ -1300,28 +1318,29 @@ where
             Ok(n) => {
                 if n > 0 {
                     if let Err(e) = tun.send(&buf[..n]).await {
-                        error!("Error writing to TUN device: {}", e);
+                        error!("Task {} Error writing to TUN device: {}", index, e);
                         break;
                     }
                     stats.increment_bytes_received(n as u64);
                     stats.increment_packets_received(1);
-                    trace!("Received and wrote {} bytes to TUN device", n);
+                    trace!("Task {} Received and wrote {} bytes to TUN device", index, n);
                 } else {
-                    error!("Read <=0 bytes from TCP stream: {}", n);
+                    error!("Task {} Read <=0 bytes from network stream: {}", index, n);
                 }
             }
             Err(e) => {
-                error!("Error reading from TCP stream: {}", e);
+                error!("Task {} Error reading from network stream: {}", index, e);
                 break;
             }
         }
     }
 }
 
-async fn copy_tun_to_generic<W>(stats: Arc<Stats>, tun: Arc<AsyncDevice>, write: W, mtu: u16)
+async fn copy_tun_to_generic<W>(index: usize,stats: Arc<Stats>, tun: Arc<AsyncDevice>, write: W, mtu: u16)
 where
     W: tokio::io::AsyncWrite + Unpin + Send + Sync + 'static,
 {
+    let index = index + 1;
     let mut write = write;
     let mut buf = vec![0u8; mtu as usize + 5];
     loop {
@@ -1330,18 +1349,18 @@ where
             Ok(n) => {
                 if n > 0 {
                     if let Err(e) = write_lengthed_data(&mut write, &buf[..n]).await {
-                        error!("Error writing to TCP stream: {}", e);
+                        error!("Task {} Error writing to network stream: {}", index, e);
                         break;
                     }
                     stats.increment_bytes_sent(n as u64);
                     stats.increment_packets_sent(1);
-                    trace!("Read and wrote {} bytes to TCP stream", n);
+                    trace!("Task {} Read and wrote {} bytes to TCP stream", index, n);
                 } else {
-                    error!("Read <=0 bytes from tun device: {}", n);
+                    error!("Task {} Read <=0 bytes from tun device: {}", index, n);
                 }
             }
             Err(e) => {
-                error!("Error reading from tun device: {}", e);
+                error!("Task {} Error reading from tun device: {}", index, e);
                 break;
             }
         }

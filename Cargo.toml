@@ -57,7 +57,7 @@ rustls-pemfile = "2"
 tokio-rustls = "0.26"
 x509-parser = "0.18"
 
-tokio-tree-context = "0.1.5"
+tokio-tree-context = "0.1.6"
 tokio-util = { version = "0.7.17", features = ["io"] }
 net-route = "0.4.6"
 chrono = "0.4"
