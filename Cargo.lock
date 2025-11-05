@@ -1970,9 +1970,9 @@ dependencies = [
 
 [[package]]
 name = "tokio-tree-context"
-version = "0.1.5"
+version = "0.1.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9de1d915082f780ec9f531766f5700b51dc9bf57dfcc02ef08fa39abb96dbedd"
+checksum = "2899dde4a1acf786535eb1aa58865476b0d8933ec5011d308826470a53f9ab80"
 dependencies = [
  "tokio",
 ]
