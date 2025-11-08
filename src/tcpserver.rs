@@ -74,6 +74,9 @@ pub struct TcpServerCli {
     /// Local routes to set up (CIDR format, can be specified multiple times)
     #[arg(long)]
     route: Vec<String>,
+
+    #[arg(long)]
+    speed_limit_in_mbps: Option<u64>,
 }
 
 
@@ -89,6 +92,7 @@ async fn run_server_indefinitely(
     peer_cn: Option<String>,
     stream_count: usize,
     mtu: u16,
+    quota: Option<Arc<precise_rate_limiter::Quota>>,
 ) -> Result<()> {
     let mut tree_context = tree_context;
     
@@ -212,6 +216,7 @@ async fn run_server_indefinitely(
             tun.clone(),
             data_streams_inner1,
             mtu,
+            quota.clone(),
         ).await;
         if let Err(e) = run_pipes_result {
             error!("Error running pipes: {}", e);
@@ -247,6 +252,17 @@ async fn main() -> Result<()> {
     info!("Server arguments validated");
     // Handle data plane (blocking)
     info!("Starting server");
+    let speed_quota = if let Some(speed_limit_in_mbps) = cli.speed_limit_in_mbps {
+        let quota =precise_rate_limiter::Quota::new(
+            (2 * speed_limit_in_mbps * 1000 * 1000) as usize, 
+            (speed_limit_in_mbps * 1000 * 10) as usize,
+        Duration::from_millis(10),
+        );
+        info!("Speed quota: {:?} mbps for sending", speed_limit_in_mbps);
+        Some(quota)
+    } else {
+        None
+    };
     run_server(
         cli.bind_address,
         cli.port,
@@ -260,6 +276,7 @@ async fn main() -> Result<()> {
         cli.ipv4,
         cli.ipv6,
         cli.route,
+        speed_quota.clone(),
     )
     .await?;
 
@@ -279,6 +296,7 @@ pub async fn run_server(
     ipv4: Option<String>,
     ipv6: Option<String>,
     local_routes: Vec<String>,
+    quota: Option<Arc<precise_rate_limiter::Quota>>,
 ) -> Result<()> {
     let mut tree_context = tokio_tree_context::Context::new();
     let stats = Arc::new(Stats::new());
@@ -300,6 +318,7 @@ pub async fn run_server(
         peer_cn.clone(),
         stream_count,
         mtu,
+        quota.clone(),
     ).await;
 
     if let Err(e) = result {

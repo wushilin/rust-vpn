@@ -1292,6 +1292,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "precise_rate_limiter"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6e997871b74ba34e20c0bd8c2f247b03947edea2b35bbcb765a4842fa91adace"
+dependencies = [
+ "tokio",
+]
+
+[[package]]
 name = "prettyplease"
 version = "0.2.37"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1497,7 +1506,7 @@ dependencies = [
 
 [[package]]
 name = "rust-vpn"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1509,6 +1518,7 @@ dependencies = [
  "humansize",
  "net-route",
  "num-format",
+ "precise_rate_limiter",
  "quinn",
  "rand",
  "rustls",

@@ -1250,6 +1250,7 @@ pub async fn run_pipes_generic<R, W>(
     device: Arc<AsyncDevice>,
     streams: Vec<(R, W)>,
     mtu: u16,
+    quota: Option<Arc<precise_rate_limiter::Quota>>,
 ) -> Result<(), anyhow::Error>
 where
     R: tokio::io::AsyncRead + Unpin + Send + Sync + 'static,
@@ -1281,6 +1282,7 @@ where
             device_clone,
             write_half,
             mtu,
+            quota.clone(),
         ));
         join_handles.push(jh2);
     }
@@ -1336,7 +1338,14 @@ where
     }
 }
 
-async fn copy_tun_to_generic<W>(index: usize,stats: Arc<Stats>, tun: Arc<AsyncDevice>, write: W, mtu: u16)
+async fn copy_tun_to_generic<W>(
+    index: usize,
+    stats: Arc<Stats>, 
+    tun: Arc<AsyncDevice>, 
+    write: W, 
+    mtu: u16,
+    quota: Option<Arc<precise_rate_limiter::Quota>>,
+)
 where
     W: tokio::io::AsyncWrite + Unpin + Send + Sync + 'static,
 {
@@ -1353,6 +1362,9 @@ where
                         break;
                     }
                     stats.increment_bytes_sent(n as u64);
+                    if let Some(quota) = quota.as_ref() {
+                        quota.acquire(n as usize * 8).await;
+                    }
                     stats.increment_packets_sent(1);
                     trace!("Task {} Read and wrote {} bytes to TCP stream", index, n);
                 } else {

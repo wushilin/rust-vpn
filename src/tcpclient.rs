@@ -66,6 +66,9 @@ pub struct TcpClientCli {
     /// Local routes to set up (CIDR format, can be specified multiple times)
     #[arg(long)]
     route: Vec<String>,
+
+    #[arg(long)]
+    speed_limit_in_mbps: Option<u64>,
 }
 
 async fn run_client_inner(
@@ -80,6 +83,7 @@ async fn run_client_inner(
     peer_cn: Option<String>,
     stream_count: usize,
     mtu: u16,
+    quota: Option<Arc<precise_rate_limiter::Quota>>,
 ) -> Result<()> {
     let mut child_context = child_context;
 
@@ -161,6 +165,7 @@ async fn run_client_inner(
         tun.clone(),
         data_streams_inner1,
         mtu,
+        quota.clone(),
     ));
     let result = jh.await;
     if let Err(e) = result {
@@ -189,6 +194,17 @@ async fn main() -> Result<()> {
     let cli = TcpClientCli::parse();
     validate_client_args(&cli)?;
     // Handle data plane (blocking)
+    let speed_quota = if let Some(speed_limit_in_mbps) = cli.speed_limit_in_mbps {
+        let quota =precise_rate_limiter::Quota::new(
+            (2 * speed_limit_in_mbps * 1000 * 1000) as usize, 
+            (speed_limit_in_mbps * 1000 * 10) as usize,
+        Duration::from_millis(10),
+        );
+        info!("Speed quota: {:?} mbps for sending", speed_limit_in_mbps);
+        Some(quota)
+    } else {
+        None
+    };
     run_client(
         cli.server,
         cli.port,
@@ -201,7 +217,8 @@ async fn main() -> Result<()> {
         cli.mtu,
         cli.ipv4,
         cli.ipv6,
-        cli.route
+        cli.route,
+        speed_quota.clone(),
     ).await?;
     
     Ok(())
@@ -220,6 +237,7 @@ pub async fn run_client(
     ipv4: Option<String>,
     ipv6: Option<String>,
     local_routes: Vec<String>,
+    quota: Option<Arc<precise_rate_limiter::Quota>>,
 ) -> Result<()> {
     let mut tree_context = tokio_tree_context::Context::new();
     let stats = Arc::new(Stats::new());
@@ -244,6 +262,7 @@ pub async fn run_client(
             peer_cn.clone(), 
             stream_count,
             mtu,
+            quota.clone(),
         ).await;
         if let Err(e) = result {
             error!("Error running client: {}", e);
