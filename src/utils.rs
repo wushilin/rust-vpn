@@ -1353,7 +1353,7 @@ where
     let mut write = write;
     let mut buf = vec![0u8; mtu as usize + 5];
     let mut remaining_quota_bytes = 0;
-    let quota_to_acquire_in_bytes = 1 * 1024 * 1024;
+    let quota_to_acquire_in_bytes = 10 * 1024;
     let quota_to_acquire_in_bits = quota_to_acquire_in_bytes * 8;
 
     loop {
