@@ -1367,18 +1367,12 @@ where
                     }
                     stats.increment_bytes_sent(n as u64);
                     if let Some(quota) = quota.as_ref() {
-                        if remaining_quota_bytes > n as usize {
+                        if remaining_quota_bytes >= n as usize {
                             remaining_quota_bytes -= n as usize;
                         } else {
-                            // we need to acquire the remaining quota
-                            let remaining_quota_bits = remaining_quota_bytes * 8;
-                            // we still have balance of remaining_quota_bits
-                            // each acquire should be quota_to_acquire_in_bits
-                            // so we need to acquire the remaining quota_bits
-                            let quota_to_acquire_bits = quota_to_acquire_in_bits - remaining_quota_bits;
-                            quota.acquire(quota_to_acquire_bits).await;
+                            quota.acquire(quota_to_acquire_in_bits).await;
                             // update the remaining quota bytes
-                            remaining_quota_bytes = quota_to_acquire_bits/8 as usize;
+                            remaining_quota_bytes = quota_to_acquire_in_bytes + remaining_quota_bytes - n;
                         }
                     }
                     stats.increment_packets_sent(1);
