@@ -1352,6 +1352,10 @@ where
     let index = index + 1;
     let mut write = write;
     let mut buf = vec![0u8; mtu as usize + 5];
+    let mut remaining_quota_bytes = 0;
+    let quota_to_acquire_in_bytes = 1 * 1024 * 1024;
+    let quota_to_acquire_in_bits = quota_to_acquire_in_bytes * 8;
+
     loop {
         let tun_result = tun.recv(&mut buf).await;
         match tun_result {
@@ -1363,7 +1367,19 @@ where
                     }
                     stats.increment_bytes_sent(n as u64);
                     if let Some(quota) = quota.as_ref() {
-                        quota.acquire(n as usize * 8).await;
+                        if remaining_quota_bytes > n as usize {
+                            remaining_quota_bytes -= n as usize;
+                        } else {
+                            // we need to acquire the remaining quota
+                            let remaining_quota_bits = remaining_quota_bytes * 8;
+                            // we still have balance of remaining_quota_bits
+                            // each acquire should be quota_to_acquire_in_bits
+                            // so we need to acquire the remaining quota_bits
+                            let quota_to_acquire_bits = quota_to_acquire_in_bits - remaining_quota_bits;
+                            quota.acquire(quota_to_acquire_bits).await;
+                            // update the remaining quota bytes
+                            remaining_quota_bytes = quota_to_acquire_bits/8 as usize;
+                        }
                     }
                     stats.increment_packets_sent(1);
                     trace!("Task {} Read and wrote {} bytes to TCP stream", index, n);

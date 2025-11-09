@@ -67,7 +67,7 @@ pub struct ServerCli {
     #[arg(long)]
     route: Vec<String>,
 
-    #[arg(long)]
+    #[arg(long, value_parser = clap::value_parser!(u64).range(10..))]
     speed_limit_in_mbps: Option<u64>,
 }
 
