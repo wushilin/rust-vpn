@@ -66,4 +66,4 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 num-format = "0.4.4"
 
-precise_rate_limiter = "0.1.0"
+precise_rate_limiter = "0.2.0"

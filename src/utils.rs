@@ -1250,7 +1250,7 @@ pub async fn run_pipes_generic<R, W>(
     device: Arc<AsyncDevice>,
     streams: Vec<(R, W)>,
     mtu: u16,
-    quota: Option<Arc<precise_rate_limiter::Quota>>,
+    quota: Option<Arc<precise_rate_limiter::FastQuota>>,
 ) -> Result<(), anyhow::Error>
 where
     R: tokio::io::AsyncRead + Unpin + Send + Sync + 'static,
@@ -1344,7 +1344,7 @@ async fn copy_tun_to_generic<W>(
     tun: Arc<AsyncDevice>, 
     write: W, 
     mtu: u16,
-    quota: Option<Arc<precise_rate_limiter::Quota>>,
+    quota: Option<Arc<precise_rate_limiter::FastQuota>>,
 )
 where
     W: tokio::io::AsyncWrite + Unpin + Send + Sync + 'static,

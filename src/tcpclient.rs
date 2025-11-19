@@ -83,7 +83,7 @@ async fn run_client_inner(
     peer_cn: Option<String>,
     stream_count: usize,
     mtu: u16,
-    quota: Option<Arc<precise_rate_limiter::Quota>>,
+    quota: Option<Arc<precise_rate_limiter::FastQuota>>,
 ) -> Result<()> {
     let mut child_context = child_context;
 
@@ -195,7 +195,7 @@ async fn main() -> Result<()> {
     validate_client_args(&cli)?;
     // Handle data plane (blocking)
     let speed_quota = if let Some(speed_limit_in_mbps) = cli.speed_limit_in_mbps {
-        let quota =precise_rate_limiter::Quota::new(
+        let quota =precise_rate_limiter::FastQuota::new(
             (2 * speed_limit_in_mbps * 1000 * 1000) as usize, 
             (speed_limit_in_mbps * 1000 * 10) as usize,
         Duration::from_millis(10),
@@ -237,7 +237,7 @@ pub async fn run_client(
     ipv4: Option<String>,
     ipv6: Option<String>,
     local_routes: Vec<String>,
-    quota: Option<Arc<precise_rate_limiter::Quota>>,
+    quota: Option<Arc<precise_rate_limiter::FastQuota>>,
 ) -> Result<()> {
     let mut tree_context = tokio_tree_context::Context::new();
     let stats = Arc::new(Stats::new());
