@@ -17,6 +17,13 @@ This is super fast.
 
 <img width="885" height="454" alt="image" src="https://github.com/user-attachments/assets/b6d6c438-0e84-4fbf-93df-2788cd278642" />
 
+## Why it is that fast?
+1. It is buit on top of quic which is secure and fast.
+2. It supports multiqueue with TUN device, unlocks potential compute power
+3. It is written in RUST, close to native performance
+4. It leverages multiple transport, independent congestion control, flow control
+
+
 ## Features
 
 - **Multiple Transport Protocols**: Supports both QUIC and TCP with separate implementations
