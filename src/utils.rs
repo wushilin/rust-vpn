@@ -1,8 +1,3 @@
-use std::fmt::Display;
-use std::net::{IpAddr};
-use std::sync::Arc;
-use std::time::Duration;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use crate::quicutil;
 use crate::stats::Stats;
 use anyhow::Context;
@@ -12,7 +7,12 @@ use quinn::{Connection, RecvStream, SendStream};
 use rand::Rng;
 use rustls_pki_types::ServerName;
 use std::collections::HashMap;
+use std::fmt::Display;
+use std::net::IpAddr;
 use std::ops::RangeInclusive;
+use std::sync::Arc;
+use std::time::Duration;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, Mutex};
 use tokio_rustls::TlsConnector;
@@ -64,7 +64,8 @@ impl From<Purpose> for &str {
 
 // Write length-prefixed data to a stream
 async fn write_lengthed_data<T>(write: &mut T, data: &[u8]) -> Result<(), anyhow::Error>
-    where T: tokio::io::AsyncWrite + Unpin + Send + Sync + 'static 
+where
+    T: tokio::io::AsyncWrite + Unpin + Send + Sync + 'static,
 {
     let length_bytes = (data.len() as u16).to_be_bytes();
     write.write_all(&length_bytes).await?;
@@ -73,11 +74,9 @@ async fn write_lengthed_data<T>(write: &mut T, data: &[u8]) -> Result<(), anyhow
 }
 
 // Read length-prefixed data from a stream
-async fn read_lengthed_data<T>(
-    read: &mut T,
-    buffer: &mut [u8],
-) -> Result<usize, anyhow::Error> 
-    where T: tokio::io::AsyncRead + Unpin + Send + Sync + 'static 
+async fn read_lengthed_data<T>(read: &mut T, buffer: &mut [u8]) -> Result<usize, anyhow::Error>
+where
+    T: tokio::io::AsyncRead + Unpin + Send + Sync + 'static,
 {
     read.read_exact(&mut buffer[..2]).await?;
     let length = u16::from_be_bytes(buffer[..2].try_into()?);
@@ -225,14 +224,21 @@ pub async fn keep_alive(send: SendStream, recv: RecvStream) -> Result<(), anyhow
     let mut receive_buffer = [0u8; 200];
     info!("Starting keep-alive loop");
     loop {
-        consecutive_timeouts +=1;
-        let write_result = tokio::time::timeout(Duration::from_secs(1), send.write_all(&[0x00u8])).await;
+        consecutive_timeouts += 1;
+        let write_result =
+            tokio::time::timeout(Duration::from_secs(1), send.write_all(&[0x00u8])).await;
         if let Err(e) = write_result {
-            warn!("Error sending keep-alive packet({}): {}", consecutive_timeouts, e);
+            warn!(
+                "Error sending keep-alive packet({}): {}",
+                consecutive_timeouts, e
+            );
         } else {
             let write_result = write_result.unwrap();
             if let Err(e) = write_result {
-                warn!("Error sending keep-alive packet({}): {}", consecutive_timeouts, e);
+                warn!(
+                    "Error sending keep-alive packet({}): {}",
+                    consecutive_timeouts, e
+                );
             } else {
                 // write ok. but we do not reset error count. only reset if we receive data.
             }
@@ -241,18 +247,27 @@ pub async fn keep_alive(send: SendStream, recv: RecvStream) -> Result<(), anyhow
         let result =
             tokio::time::timeout(Duration::from_secs(1), recv.read(&mut receive_buffer)).await;
         if let Err(e) = result {
-            warn!("Timeout receiving keep-alive packet({}): {}", consecutive_timeouts, e);
+            warn!(
+                "Timeout receiving keep-alive packet({}): {}",
+                consecutive_timeouts, e
+            );
         } else {
             let result = result.unwrap();
             if let Err(e) = result {
-                warn!("Error receiving keep-alive packet({}): {}", consecutive_timeouts, e);
+                warn!(
+                    "Error receiving keep-alive packet({}): {}",
+                    consecutive_timeouts, e
+                );
             } else {
                 let size = result.unwrap();
                 if let Some(_count) = size {
                     // If we received data, we're good
                     consecutive_timeouts = 0;
                 } else {
-                    warn!("Error receiving keep-live packet: no data received ({})", consecutive_timeouts);
+                    warn!(
+                        "Error receiving keep-live packet: no data received ({})",
+                        consecutive_timeouts
+                    );
                 }
             }
         }
@@ -586,7 +601,7 @@ pub fn handshake_server_adapter<'a>(
     recv: &'a mut RecvStream,
     send: &'a mut SendStream,
 ) -> core::pin::Pin<Box<dyn std::future::Future<Output = Result<(), anyhow::Error>> + Send + 'a>> {
-    Box::pin(do_stream_handshake_server(recv,send))
+    Box::pin(do_stream_handshake_server(recv, send))
 }
 
 /// Apply routes directly from a vector of route strings (used for local route setup)
@@ -684,7 +699,11 @@ fn validate_peer_cn(
     let cn = cn.unwrap();
     if cn != *expected_cn {
         error!("CN mismatch: expected '{}', got '{}'", expected_cn, cn);
-        return Err(anyhow::anyhow!("CN mismatch: expected '{}', got '{}'", expected_cn, cn));
+        return Err(anyhow::anyhow!(
+            "CN mismatch: expected '{}', got '{}'",
+            expected_cn,
+            cn
+        ));
     }
     info!("Peer CN validated: {}", expected_cn);
     Ok(())
@@ -702,7 +721,7 @@ fn validate_peer_cn_server(
     let peer_certs = tls_stream.get_ref().1.peer_certificates();
     validate_peer_cn(peer_certs, expected_cn)?;
     Ok(())
-}   
+}
 
 fn validate_peer_cn_client(
     tls_stream: &mut ClientTlsStream<TcpStream>,
@@ -725,7 +744,15 @@ pub async fn connect_tls_for_control_plane(
     connector: TlsConnector,
     peer_cn: Option<String>,
 ) -> Result<(ClientTlsStream<TcpStream>, std::net::SocketAddr), anyhow::Error> {
-    connect_tls_for_purpose(server, port, server_name, Purpose::ControlPlane, connector, peer_cn).await
+    connect_tls_for_purpose(
+        server,
+        port,
+        server_name,
+        Purpose::ControlPlane,
+        connector,
+        peer_cn,
+    )
+    .await
 }
 
 pub async fn connect_tls_for_data_plane(
@@ -735,7 +762,15 @@ pub async fn connect_tls_for_data_plane(
     connector: TlsConnector,
     peer_cn: Option<String>,
 ) -> Result<(ClientTlsStream<TcpStream>, std::net::SocketAddr), anyhow::Error> {
-    connect_tls_for_purpose(server, port, server_name, Purpose::DataPlane, connector, peer_cn).await
+    connect_tls_for_purpose(
+        server,
+        port,
+        server_name,
+        Purpose::DataPlane,
+        connector,
+        peer_cn,
+    )
+    .await
 }
 pub async fn connect_tls_for_purpose(
     server: String,
@@ -750,20 +785,21 @@ pub async fn connect_tls_for_purpose(
     let tcp_stream = TcpStream::connect(addr_str.clone()).await?;
     let remote_addr = tcp_stream.peer_addr()?;
     tcp_stream.set_nodelay(true)?;
-    debug!("{} TCP_NODELAY set on new stream with remote address {}", purpose, remote_addr);
+    debug!(
+        "{} TCP_NODELAY set on new stream with remote address {}",
+        purpose, remote_addr
+    );
     info!("{} Connected to {}", purpose, addr_str);
-    let mut tls_stream = connector.connect(
-        server_name, 
-        tcp_stream).await?;
+    let mut tls_stream = connector.connect(server_name, tcp_stream).await?;
     info!("{} TLS handshake completed for {}", purpose, addr_str);
     validate_peer_cn_client(&mut tls_stream, &peer_cn)?;
     debug!("{} Peer CN validated: {:?}", purpose, peer_cn);
 
-    let purpose_str:&str = purpose.clone().into();
+    let purpose_str: &str = purpose.clone().into();
     let bytes = purpose_str.as_bytes();
     write_lengthed_data(&mut tls_stream, bytes).await?;
     debug!("{} Sent purpose to server: {}", purpose, purpose_str);
-    Ok((tls_stream, remote_addr ))
+    Ok((tls_stream, remote_addr))
 }
 pub async fn run_tls_acceptance_loop(
     name: String,
@@ -771,7 +807,9 @@ pub async fn run_tls_acceptance_loop(
     listener: TcpListener,
     acceptor: TlsAcceptor,
     peer_cn: Option<String>,
-    senders:Arc<Mutex<HashMap<String, mpsc::Sender<(ServerTlsStream<TcpStream>, std::net::SocketAddr)>>>>,
+    senders: Arc<
+        Mutex<HashMap<String, mpsc::Sender<(ServerTlsStream<TcpStream>, std::net::SocketAddr)>>>,
+    >,
 ) -> Result<(), anyhow::Error> {
     let mut ctx = ctx;
     info!("{} acceptance loop started", name);
@@ -808,15 +846,18 @@ pub async fn run_tls_acceptance_loop(
             if let Err(e) = validate_result {
                 error!("{} Error validating peer CN: {}", name_clone, e);
                 return;
-            } 
+            }
             info!(
                 "{} TLS handshake completed for stream from {}",
                 name_clone, peer_addr
             );
 
             let mut purpose_bytes = vec![0u8; 100];
-            let purpose = 
-                tokio::time::timeout(Duration::from_secs(3), read_lengthed_data(&mut tls_stream, &mut purpose_bytes)).await;
+            let purpose = tokio::time::timeout(
+                Duration::from_secs(3),
+                read_lengthed_data(&mut tls_stream, &mut purpose_bytes),
+            )
+            .await;
             if let Err(e) = purpose {
                 error!("{} Timeout reading purpose: {}", name_clone, e);
                 return;
@@ -837,10 +878,16 @@ pub async fn run_tls_acceptance_loop(
                 if let Err(e) = send_result {
                     error!("{} Error sending connection to channel: {}", name_clone, e);
                 } else {
-                    info!("{} Sent connection to channel: {}, purpose: {}", name_clone, peer_addr, purpose_str);
+                    info!(
+                        "{} Sent connection to channel: {}, purpose: {}",
+                        name_clone, peer_addr, purpose_str
+                    );
                 }
             } else {
-                error!("{} No sender found for purpose: {}", name_clone, purpose_str);
+                error!(
+                    "{} No sender found for purpose: {}",
+                    name_clone, purpose_str
+                );
                 return;
             }
         });
@@ -907,7 +954,10 @@ async fn must_accept_n_connections(
     for _ in 0..count {
         empty_streams.push(None);
     }
-    info!("Accepted {} connections, now performing handshake", streams.len());
+    info!(
+        "Accepted {} connections, now performing handshake",
+        streams.len()
+    );
     let result_streams = Arc::new(Mutex::new(empty_streams));
     let mut join_handles = Vec::with_capacity(count);
     for (i, (mut tls_stream, peer_addr)) in streams.into_iter().enumerate() {
@@ -949,7 +999,10 @@ async fn must_accept_n_connections(
     }
 
     let count = join_handles.len();
-    info!("Waiting for {} connections handshakes to complete", join_handles.len());
+    info!(
+        "Waiting for {} connections handshakes to complete",
+        join_handles.len()
+    );
     for jh in join_handles {
         let wr = jh.await;
         if let Err(e) = wr {
@@ -963,11 +1016,16 @@ async fn must_accept_n_connections(
 
     for stream in result_streams_locked.iter() {
         if stream.is_none() {
-            return Err(anyhow::anyhow!("Error accepting connection: stream is None"));
+            return Err(anyhow::anyhow!(
+                "Error accepting connection: stream is None"
+            ));
         }
     }
     info!("All handshakes completed, no errors");
-    let result_streams =result_streams_locked.drain(..).map(|stream| stream.unwrap()).collect();
+    let result_streams = result_streams_locked
+        .drain(..)
+        .map(|stream| stream.unwrap())
+        .collect();
     return Ok(result_streams);
 }
 
@@ -978,7 +1036,15 @@ async fn connect_one_data_plane_tls(
     server_name: ServerName<'static>,
     peer_cn: Option<String>,
 ) -> Result<(ClientTlsStream<TcpStream>, std::net::SocketAddr), anyhow::Error> {
-    connect_tls_for_purpose(server, port, server_name, Purpose::DataPlane, connector, peer_cn).await
+    connect_tls_for_purpose(
+        server,
+        port,
+        server_name,
+        Purpose::DataPlane,
+        connector,
+        peer_cn,
+    )
+    .await
 }
 
 async fn must_connect_n_data_connections(
@@ -992,7 +1058,10 @@ async fn must_connect_n_data_connections(
     my_token: &str,
     their_token: &str,
 ) -> Result<Vec<(ClientTlsStream<TcpStream>, std::net::SocketAddr)>, anyhow::Error> {
-    info!("Connecting {} connections to {}:{} with server name {:?}", count, server, port, server_name);
+    info!(
+        "Connecting {} connections to {}:{} with server name {:?}",
+        count, server, port, server_name
+    );
     let mut context = context;
     let mut streams = Vec::with_capacity(count);
     for _ in 0..count {
@@ -1010,14 +1079,24 @@ async fn must_connect_n_data_connections(
         let server_clone = server.clone();
         let peer_cn_clone = peer_cn.clone();
         let jh = context.spawn(async move {
-            let stream =
-                connect_one_data_plane_tls(connector_clone, server_clone, port, server_name_clone, peer_cn_clone).await;
+            let stream = connect_one_data_plane_tls(
+                connector_clone,
+                server_clone,
+                port,
+                server_name_clone,
+                peer_cn_clone,
+            )
+            .await;
             match stream {
                 Ok((mut tls_stream, local_addr)) => {
                     // set tcp no delay
                     info!("Connection {} connected via {}", i + 1, local_addr);
-                    let handshake_result = must_handshake_client_tcp(&mut tls_stream, &my_token_clone, &their_token_clone)
-                        .await;
+                    let handshake_result = must_handshake_client_tcp(
+                        &mut tls_stream,
+                        &my_token_clone,
+                        &their_token_clone,
+                    )
+                    .await;
                     match handshake_result {
                         Ok(_) => {
                             info!("Connection {} handshake completed", i + 1);
@@ -1036,7 +1115,10 @@ async fn must_connect_n_data_connections(
         join_handles.push(jh);
     }
 
-    info!("Waiting for {} connections handshakes to complete", join_handles.len());
+    info!(
+        "Waiting for {} connections handshakes to complete",
+        join_handles.len()
+    );
     for jh in join_handles {
         let wr = jh.await;
         if let Err(e) = wr {
@@ -1048,11 +1130,16 @@ async fn must_connect_n_data_connections(
     let mut streams_locked = streams.lock().await;
     for stream in streams_locked.iter() {
         if stream.is_none() {
-            return Err(anyhow::anyhow!("Error connecting connection: stream is None"));
+            return Err(anyhow::anyhow!(
+                "Error connecting connection: stream is None"
+            ));
         }
     }
     info!("All connections handshakes completed, no errors");
-    let result_streams = streams_locked.drain(..).map(|stream| stream.unwrap()).collect();
+    let result_streams = streams_locked
+        .drain(..)
+        .map(|stream| stream.unwrap())
+        .collect();
     return Ok(result_streams);
 }
 
@@ -1142,70 +1229,6 @@ pub fn random_string_from_choices(choices: &str, length: usize) -> String {
     return chars.iter().collect();
 }
 
-pub async fn copy_recv_stream_to_tun(
-    stats: Arc<Stats>,
-    recv: RecvStream,
-    tun: Arc<AsyncDevice>,
-    mtu: u16,
-) {
-    let mut recv = recv;
-    let mut buf = vec![0u8; mtu as usize + 5];
-    loop {
-        let lengthed_data_result = read_lengthed_data(&mut recv, &mut buf).await;
-        match lengthed_data_result {
-            Ok(n) => {
-                if n > 0 {
-                    if let Err(e) = tun.send(&buf[..n]).await {
-                        error!("Error writing to TUN device: {}", e);
-                        break;
-                    }
-                    stats.increment_bytes_received(n as u64);
-                    stats.increment_packets_received(1);
-                    trace!("Received and wrote {} bytes to TUN device", n);
-                } else {
-                    error!("Read <=0 bytes from recv stream: {}", n);
-                }
-            }
-            Err(e) => {
-                error!("Error reading from recv stream: {}", e);
-                break;
-            }
-        }
-    }
-}
-
-pub async fn copy_tun_to_send_stream(
-    stats: Arc<Stats>,
-    tun: Arc<AsyncDevice>,
-    send: SendStream,
-    mtu: u16,
-) {
-    let mut send = send;
-    let mut buf = vec![0u8; mtu as usize + 5];
-    loop {
-        let tun_result = tun.recv(&mut buf).await;
-        match tun_result {
-            Ok(n) => {
-                if n > 0 {
-                    if let Err(e) = write_lengthed_data(&mut send, &buf[..n]).await {
-                        error!("Error writing to send stream: {}", e);
-                        break;
-                    }
-                    stats.increment_bytes_sent(n as u64);
-                    stats.increment_packets_sent(1);
-                    trace!("Read and wrote {} bytes to send stream", n);
-                } else {
-                    error!("Read <=0 bytes from tun device: {}", n);
-                }
-            }
-            Err(e) => {
-                error!("Error reading from tun device: {}", e);
-                break;
-            }
-        }
-    }
-}
-
 // TCP config exchange - client side (over TLS)
 pub async fn do_config_exchange_client_tcp(
     tls_stream: &mut tokio_rustls::client::TlsStream<tokio::net::TcpStream>,
@@ -1287,7 +1310,10 @@ where
         join_handles.push(jh2);
     }
 
-    info!("Spawning {} tasks for IO (sender + receiver).", join_handles.len());
+    info!(
+        "Spawning {} tasks for IO (sender + receiver).",
+        join_handles.len()
+    );
     info!("VPN UP");
     let (result, _index, remaining) = select_all(join_handles).await;
     let error_index = _index;
@@ -1307,8 +1333,13 @@ where
     Ok(())
 }
 
-async fn copy_generic_to_tun<R>(index: usize, stats: Arc<Stats>, read: R, tun: Arc<AsyncDevice>, mtu: u16)
-where
+async fn copy_generic_to_tun<R>(
+    index: usize,
+    stats: Arc<Stats>,
+    read: R,
+    tun: Arc<AsyncDevice>,
+    mtu: u16,
+) where
     R: tokio::io::AsyncRead + Unpin + Send + Sync + 'static,
 {
     let index = index + 1;
@@ -1325,7 +1356,11 @@ where
                     }
                     stats.increment_bytes_received(n as u64);
                     stats.increment_packets_received(1);
-                    trace!("Task {} Received and wrote {} bytes to TUN device", index, n);
+                    trace!(
+                        "Task {} Received and wrote {} bytes to TUN device",
+                        index,
+                        n
+                    );
                 } else {
                     error!("Task {} Read <=0 bytes from network stream: {}", index, n);
                 }
@@ -1340,13 +1375,12 @@ where
 
 async fn copy_tun_to_generic<W>(
     index: usize,
-    stats: Arc<Stats>, 
-    tun: Arc<AsyncDevice>, 
-    write: W, 
+    stats: Arc<Stats>,
+    tun: Arc<AsyncDevice>,
+    write: W,
     mtu: u16,
     quota: Option<Arc<precise_rate_limiter::FastQuota>>,
-)
-where
+) where
     W: tokio::io::AsyncWrite + Unpin + Send + Sync + 'static,
 {
     let index = index + 1;
@@ -1372,7 +1406,8 @@ where
                         } else {
                             quota.acquire(quota_to_acquire_in_bits).await;
                             // update the remaining quota bytes
-                            remaining_quota_bytes = quota_to_acquire_in_bytes + remaining_quota_bytes - n;
+                            remaining_quota_bytes =
+                                quota_to_acquire_in_bytes + remaining_quota_bytes - n;
                         }
                     }
                     stats.increment_packets_sent(1);
@@ -1389,8 +1424,11 @@ where
     }
 }
 
-
-pub fn build_tls_connector(ca_bundle: &str, client_cert: &str, client_key: &str) -> Result<TlsConnector, anyhow::Error> {
+pub fn build_tls_connector(
+    ca_bundle: &str,
+    client_cert: &str,
+    client_key: &str,
+) -> Result<TlsConnector, anyhow::Error> {
     let cert_chain = quicutil::load_cert_chain(client_cert)?;
     let key = quicutil::load_private_key(client_key)?;
     let certs: Vec<tokio_rustls::rustls::pki_types::CertificateDer<'static>> = cert_chain
@@ -1398,15 +1436,27 @@ pub fn build_tls_connector(ca_bundle: &str, client_cert: &str, client_key: &str)
         .map(|c| tokio_rustls::rustls::pki_types::CertificateDer::from(c.as_ref().to_vec()))
         .collect();
     let key_der = match key {
-        rustls_pki_types::PrivateKeyDer::Pkcs8(k) => tokio_rustls::rustls::pki_types::PrivateKeyDer::Pkcs8(
-            tokio_rustls::rustls::pki_types::PrivatePkcs8KeyDer::from(k.secret_pkcs8_der().to_vec())
-        ),
-        rustls_pki_types::PrivateKeyDer::Pkcs1(k) => tokio_rustls::rustls::pki_types::PrivateKeyDer::Pkcs1(
-            tokio_rustls::rustls::pki_types::PrivatePkcs1KeyDer::from(k.secret_pkcs1_der().to_vec())
-        ),
-        rustls_pki_types::PrivateKeyDer::Sec1(k) => tokio_rustls::rustls::pki_types::PrivateKeyDer::Sec1(
-            tokio_rustls::rustls::pki_types::PrivateSec1KeyDer::from(k.secret_sec1_der().to_vec())
-        ),
+        rustls_pki_types::PrivateKeyDer::Pkcs8(k) => {
+            tokio_rustls::rustls::pki_types::PrivateKeyDer::Pkcs8(
+                tokio_rustls::rustls::pki_types::PrivatePkcs8KeyDer::from(
+                    k.secret_pkcs8_der().to_vec(),
+                ),
+            )
+        }
+        rustls_pki_types::PrivateKeyDer::Pkcs1(k) => {
+            tokio_rustls::rustls::pki_types::PrivateKeyDer::Pkcs1(
+                tokio_rustls::rustls::pki_types::PrivatePkcs1KeyDer::from(
+                    k.secret_pkcs1_der().to_vec(),
+                ),
+            )
+        }
+        rustls_pki_types::PrivateKeyDer::Sec1(k) => {
+            tokio_rustls::rustls::pki_types::PrivateKeyDer::Sec1(
+                tokio_rustls::rustls::pki_types::PrivateSec1KeyDer::from(
+                    k.secret_sec1_der().to_vec(),
+                ),
+            )
+        }
         _ => anyhow::bail!("Unsupported private key format"),
     };
     let ca_store = quicutil::load_ca_bundle_tcp_tokio(ca_bundle)?;
@@ -1418,8 +1468,11 @@ pub fn build_tls_connector(ca_bundle: &str, client_cert: &str, client_key: &str)
     Ok(connector)
 }
 
-
-pub fn build_tls_acceptor(ca_bundle: &str, server_cert: &str, server_key: &str) -> Result<TlsAcceptor, anyhow::Error> {
+pub fn build_tls_acceptor(
+    ca_bundle: &str,
+    server_cert: &str,
+    server_key: &str,
+) -> Result<TlsAcceptor, anyhow::Error> {
     let cert_chain = quicutil::load_cert_chain(server_cert)?;
     let key = quicutil::load_private_key(server_key)?;
     let certs: Vec<tokio_rustls::rustls::pki_types::CertificateDer<'static>> = cert_chain
@@ -1427,21 +1480,34 @@ pub fn build_tls_acceptor(ca_bundle: &str, server_cert: &str, server_key: &str) 
         .map(|c| tokio_rustls::rustls::pki_types::CertificateDer::from(c.as_ref().to_vec()))
         .collect();
     let key_der = match key {
-        rustls_pki_types::PrivateKeyDer::Pkcs8(k) => tokio_rustls::rustls::pki_types::PrivateKeyDer::Pkcs8(
-            tokio_rustls::rustls::pki_types::PrivatePkcs8KeyDer::from(k.secret_pkcs8_der().to_vec())
-        ),
-        rustls_pki_types::PrivateKeyDer::Pkcs1(k) => tokio_rustls::rustls::pki_types::PrivateKeyDer::Pkcs1(
-            tokio_rustls::rustls::pki_types::PrivatePkcs1KeyDer::from(k.secret_pkcs1_der().to_vec())
-        ),
-        rustls_pki_types::PrivateKeyDer::Sec1(k) => tokio_rustls::rustls::pki_types::PrivateKeyDer::Sec1(
-            tokio_rustls::rustls::pki_types::PrivateSec1KeyDer::from(k.secret_sec1_der().to_vec())
-        ),
+        rustls_pki_types::PrivateKeyDer::Pkcs8(k) => {
+            tokio_rustls::rustls::pki_types::PrivateKeyDer::Pkcs8(
+                tokio_rustls::rustls::pki_types::PrivatePkcs8KeyDer::from(
+                    k.secret_pkcs8_der().to_vec(),
+                ),
+            )
+        }
+        rustls_pki_types::PrivateKeyDer::Pkcs1(k) => {
+            tokio_rustls::rustls::pki_types::PrivateKeyDer::Pkcs1(
+                tokio_rustls::rustls::pki_types::PrivatePkcs1KeyDer::from(
+                    k.secret_pkcs1_der().to_vec(),
+                ),
+            )
+        }
+        rustls_pki_types::PrivateKeyDer::Sec1(k) => {
+            tokio_rustls::rustls::pki_types::PrivateKeyDer::Sec1(
+                tokio_rustls::rustls::pki_types::PrivateSec1KeyDer::from(
+                    k.secret_sec1_der().to_vec(),
+                ),
+            )
+        }
         _ => anyhow::bail!("Unsupported private key format"),
     };
     let ca_store = quicutil::load_ca_bundle_tcp_tokio(ca_bundle)?;
-    let client_verifier = tokio_rustls::rustls::server::WebPkiClientVerifier::builder(ca_store.into())
-        .build()
-        .map_err(|e| anyhow::anyhow!("Failed to create client cert verifier: {:?}", e))?;   
+    let client_verifier =
+        tokio_rustls::rustls::server::WebPkiClientVerifier::builder(ca_store.into())
+            .build()
+            .map_err(|e| anyhow::anyhow!("Failed to create client cert verifier: {:?}", e))?;
     let server_config = tokio_rustls::rustls::ServerConfig::builder()
         .with_client_cert_verifier(client_verifier)
         .with_single_cert(certs, key_der)
