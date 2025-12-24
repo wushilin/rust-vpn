@@ -1,0 +1,5 @@
+noprofile
+copy target/x86_64-unknown-linux-musl/release/server oss://fleetman/prod/staging/rust-vpn/
+copy target/x86_64-unknown-linux-musl/release/tcpserver oss://fleetman/prod/staging/rust-vpn/
+copy target/x86_64-unknown-linux-musl/release/client oss://fleetman/prod/staging/rust-vpn/
+copy target/x86_64-unknown-linux-musl/release/tcpclient oss://fleetman/prod/staging/rust-vpn/
