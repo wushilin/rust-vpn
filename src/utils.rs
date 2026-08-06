@@ -1,5 +1,6 @@
 use crate::quicutil;
 use crate::stats::Stats;
+use crate::tunutil;
 use anyhow::Context;
 use futures::future::select_all;
 use net_route::{Handle, Route};
@@ -1281,15 +1282,24 @@ where
 {
     let mut child_context = child_context;
     let mut join_handles = Vec::new();
+    if !tunutil::MULTI_QUEUE_SUPPORTED && streams.len() > 1 {
+        warn!(
+            "Multi-queue TUN is not supported on this platform; {} streams will share a single TUN queue",
+            streams.len()
+        );
+    }
     for (i, (read_half, write_half)) in streams.into_iter().enumerate() {
         let index = i;
         let device_clone = if i == 0 {
             debug!("Using original TUN device for IO for thread {}", i + 1);
             device.clone()
         } else {
-            debug!("Opened new queue on TUN device for IO for thread {}", i + 1);
-            let cloned = device.try_clone()?;
-            Arc::new(cloned)
+            if tunutil::MULTI_QUEUE_SUPPORTED {
+                debug!("Opened new queue on TUN device for IO for thread {}", i + 1);
+            } else {
+                debug!("Sharing the single TUN queue for IO for thread {}", i + 1);
+            }
+            tunutil::open_extra_queue(&device)?
         };
         let jh1 = child_context.spawn(copy_generic_to_tun(
             index,
